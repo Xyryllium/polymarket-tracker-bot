@@ -11,6 +11,7 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const COMMAND_PREFIX = process.env.COMMAND_PREFIX ?? "!";
 const START_COMMAND = `${COMMAND_PREFIX}start`;
 const STOP_COMMAND = `${COMMAND_PREFIX}stop`;
+const ALERT_ROLE_ID = process.env.ALERT_ROLE_ID;
 
 if (!DISCORD_TOKEN) {
   throw new Error("Missing DISCORD_TOKEN in environment variables.");
@@ -111,6 +112,7 @@ async function pollOnce() {
       } = trade;
 
       const time = new Date(timestamp * 1000).toISOString();
+      const mention = ALERT_ROLE_ID ? `<@&${ALERT_ROLE_ID}> ` : "";
       const message = [
         `**New Polymarket BUY**`,
         `Market: ${title ?? slug ?? "Unknown market"}`,
@@ -126,7 +128,7 @@ async function pollOnce() {
         .join("\n");
 
       try {
-        await activeChannel.send({ content: message });
+        await activeChannel.send({ content: `${mention}${message}` });
       } catch (error) {
         console.error("Failed to send message to Discord", error);
       }
