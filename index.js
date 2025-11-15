@@ -111,14 +111,17 @@ async function pollOnce() {
         slug,
       } = trade;
 
-      const time = new Date(timestamp * 1000).toISOString();
+      const priceInCents = price != null ? Math.round(price * 100) : null;
+      const formattedPrice = priceInCents != null ? `${priceInCents}¢` : "N/A";
+      const discordTimestamp = timestamp != null ? `<t:${timestamp}:f>` : "N/A";
+
       const mention = ALERT_ROLE_ID ? `<@&${ALERT_ROLE_ID}> ` : "";
       const message = [
         `**New Polymarket BUY**`,
         `Market: ${title ?? slug ?? "Unknown market"}`,
-        `Outcome: ${outcome ?? "Unknown"} @ ${price ?? "N/A"}`,
+        `Outcome: ${outcome ?? "Unknown"} @ ${formattedPrice}`,
         `Size: ${size ?? "?"} shares (~${usdcSize ?? "?"} USDC)`,
-        `When: ${time}`,
+        `When: ${discordTimestamp}`,
         `Tx: https://polygonscan.com/tx/${transactionHash}`,
         eventSlug
           ? `Market page: https://polymarket.com/market/${eventSlug}`
