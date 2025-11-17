@@ -36,6 +36,7 @@ if (!Number.isFinite(POLL_INTERVAL_MS) || POLL_INTERVAL_MS < 5000) {
 }
 
 let clobClient = null;
+let clobClientReady = false;
 if (POLYMARKET_PRIVATE_KEY) {
   (async () => {
     try {
@@ -54,10 +55,13 @@ if (POLYMARKET_PRIVATE_KEY) {
 
       const apiKey = await clobClient.deriveApiKey();
       clobClient.setApiCreds(apiKey);
+      clobClientReady = true;
       console.log("CLOB client initialized successfully");
     } catch (error) {
       console.error("Failed to initialize CLOB client:", error.message);
       console.warn("Order placement features will be disabled");
+      clobClient = null;
+      clobClientReady = false;
     }
   })();
 } else {
@@ -206,6 +210,7 @@ async function pollOnce() {
         if (
           AUTO_TRADE_ENABLED &&
           clobClient &&
+          clobClientReady &&
           conditionId &&
           matchesAutoTradeFilter(trade)
         ) {
@@ -293,6 +298,7 @@ async function pollOnce() {
         } else if (
           AUTO_TRADE_ENABLED &&
           clobClient &&
+          clobClientReady &&
           conditionId &&
           !matchesAutoTradeFilter(trade)
         ) {
@@ -337,9 +343,9 @@ function matchesAutoTradeFilter(trade) {
 }
 
 async function placeBuyOrder(tokenId, price, size, orderType = OrderType.GTC) {
-  if (!clobClient) {
+  if (!clobClient || !clobClientReady) {
     throw new Error(
-      "CLOB client not initialized. Set POLYMARKET_PRIVATE_KEY in .env"
+      "CLOB client not initialized or API credentials not set. Please wait for initialization to complete."
     );
   }
 
@@ -361,9 +367,9 @@ async function placeBuyOrder(tokenId, price, size, orderType = OrderType.GTC) {
 }
 
 async function placeSellOrder(tokenId, price, size, orderType = OrderType.GTC) {
-  if (!clobClient) {
+  if (!clobClient || !clobClientReady) {
     throw new Error(
-      "CLOB client not initialized. Set POLYMARKET_PRIVATE_KEY in .env"
+      "CLOB client not initialized or API credentials not set. Please wait for initialization to complete."
     );
   }
 
@@ -385,9 +391,9 @@ async function placeSellOrder(tokenId, price, size, orderType = OrderType.GTC) {
 }
 
 async function placeMarketBuyOrder(tokenId, amount, price) {
-  if (!clobClient) {
+  if (!clobClient || !clobClientReady) {
     throw new Error(
-      "CLOB client not initialized. Set POLYMARKET_PRIVATE_KEY in .env"
+      "CLOB client not initialized or API credentials not set. Please wait for initialization to complete."
     );
   }
 
@@ -409,9 +415,9 @@ async function placeMarketBuyOrder(tokenId, amount, price) {
 }
 
 async function placeMarketSellOrder(tokenId, amount, price) {
-  if (!clobClient) {
+  if (!clobClient || !clobClientReady) {
     throw new Error(
-      "CLOB client not initialized. Set POLYMARKET_PRIVATE_KEY in .env"
+      "CLOB client not initialized or API credentials not set. Please wait for initialization to complete."
     );
   }
 
