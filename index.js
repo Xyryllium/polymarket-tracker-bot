@@ -31,6 +31,7 @@ const client = new Client({
 
 let isInitialized = false;
 const seenHashes = new Set();
+const seenMarkets = new Set();
 let isPolling = false;
 let pollTimeout = null;
 let activeChannel = null;
@@ -80,7 +81,12 @@ async function pollOnce() {
     );
 
     if (!isInitialized) {
-      trades.forEach((trade) => seenHashes.add(trade.transactionHash));
+      trades.forEach((trade) => {
+        seenHashes.add(trade.transactionHash);
+        if (trade.conditionId) {
+          seenMarkets.add(trade.conditionId);
+        }
+      });
       isInitialized = true;
       return;
     }
@@ -101,6 +107,14 @@ async function pollOnce() {
     for (const trade of newTrades.reverse()) {
       seenHashes.add(trade.transactionHash);
 
+      if (trade.conditionId && seenMarkets.has(trade.conditionId)) {
+        continue;
+      }
+
+      if (trade.conditionId) {
+        seenMarkets.add(trade.conditionId);
+      }
+
       const {
         title,
         price,
@@ -112,6 +126,7 @@ async function pollOnce() {
         eventSlug,
         slug,
         side,
+        conditionId,
       } = trade;
 
       const tradeSide = String(side).toUpperCase();
@@ -176,7 +191,6 @@ async function startPolling(channel, walletAddress = null) {
     return;
   }
 
-  // Use provided wallet or default
   const walletToUse = walletAddress || DEFAULT_WALLET;
 
   if (!isValidWalletAddress(walletToUse)) {
@@ -190,6 +204,7 @@ async function startPolling(channel, walletAddress = null) {
   activeChannel = channel;
   isPolling = true;
   isInitialized = false;
+  seenMarkets.clear();
 
   const walletDisplay =
     walletToUse === DEFAULT_WALLET
@@ -245,7 +260,6 @@ client.on("messageCreate", async (message) => {
   const contentLower = content.toLowerCase();
 
   if (contentLower.startsWith(START_COMMAND.toLowerCase())) {
-    // Parse wallet address from command: !start <wallet_address> or just !start
     const parts = content.split(/\s+/);
     const walletAddress = parts.length > 1 ? parts[1] : null;
     await startPolling(message.channel, walletAddress);
