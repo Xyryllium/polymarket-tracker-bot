@@ -3,8 +3,7 @@ require("dotenv").config();
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const fetch = require("node-fetch");
 
-const WALLET = "0x0f37cb80dee49d55b5f6d9e595d52591d6371410";
-const API_URL = `https://data-api.polymarket.com/activity?user=${WALLET}&limit=25&offset=0`;
+const DEFAULT_WALLET = "0x0f37cb80dee49d55b5f6d9e595d52591d6371410";
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 15000);
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -35,9 +34,11 @@ const seenHashes = new Set();
 let isPolling = false;
 let pollTimeout = null;
 let activeChannel = null;
+let currentWallet = DEFAULT_WALLET;
 
-async function fetchLatestActivity() {
-  const response = await fetch(API_URL, {
+async function fetchLatestActivity(walletAddress) {
+  const apiUrl = `https://data-api.polymarket.com/activity?user=${walletAddress}&limit=25&offset=0`;
+  const response = await fetch(apiUrl, {
     headers: {
       accept: "application/json",
     },
@@ -68,22 +69,23 @@ async function pollOnce() {
       return;
     }
 
-    const activities = await fetchLatestActivity();
+    const activities = await fetchLatestActivity(currentWallet);
 
-    const buyTrades = activities.filter(
+    const trades = activities.filter(
       (item) =>
         item?.type === "TRADE" &&
-        String(item?.side).toUpperCase() === "BUY" &&
+        (String(item?.side).toUpperCase() === "BUY" ||
+          String(item?.side).toUpperCase() === "SELL") &&
         item?.transactionHash
     );
 
     if (!isInitialized) {
-      buyTrades.forEach((trade) => seenHashes.add(trade.transactionHash));
+      trades.forEach((trade) => seenHashes.add(trade.transactionHash));
       isInitialized = true;
       return;
     }
 
-    const newTrades = buyTrades.filter(
+    const newTrades = trades.filter(
       (trade) => !seenHashes.has(trade.transactionHash)
     );
 
@@ -109,15 +111,17 @@ async function pollOnce() {
         outcome,
         eventSlug,
         slug,
+        side,
       } = trade;
 
+      const tradeSide = String(side).toUpperCase();
       const priceInCents = price != null ? Math.round(price * 100) : null;
       const formattedPrice = priceInCents != null ? `${priceInCents}¢` : "N/A";
       const discordTimestamp = timestamp != null ? `<t:${timestamp}:f>` : "N/A";
 
       const mention = ALERT_ROLE_ID ? `<@&${ALERT_ROLE_ID}> ` : "";
       const message = [
-        `**New Polymarket BUY**`,
+        `**New Polymarket ${tradeSide}**`,
         `Market: ${title ?? slug ?? "Unknown market"}`,
         `Outcome: ${outcome ?? "Unknown"} @ ${formattedPrice}`,
         `Size: ${size ?? "?"} shares (~${usdcSize ?? "?"} USDC)`,
@@ -148,7 +152,11 @@ async function runPollLoop() {
   }
 }
 
-async function startPolling(channel) {
+function isValidWalletAddress(address) {
+  return /^0x[a-fA-F0-9]{40}$/.test(address);
+}
+
+async function startPolling(channel, walletAddress = null) {
   if (isPolling) {
     if (activeChannel?.id === channel.id) {
       await channel.send("Polling is already running in this channel.");
@@ -168,12 +176,30 @@ async function startPolling(channel) {
     return;
   }
 
+  // Use provided wallet or default
+  const walletToUse = walletAddress || DEFAULT_WALLET;
+
+  if (!isValidWalletAddress(walletToUse)) {
+    await channel.send(
+      `Invalid wallet address: ${walletToUse}. Please provide a valid Ethereum address (0x followed by 40 hex characters).`
+    );
+    return;
+  }
+
+  currentWallet = walletToUse;
   activeChannel = channel;
   isPolling = true;
   isInitialized = false;
 
+  const walletDisplay =
+    walletToUse === DEFAULT_WALLET
+      ? `default wallet (${DEFAULT_WALLET})`
+      : walletToUse;
+
   await channel.send(
-    `Starting Polymarket monitoring with interval ${POLL_INTERVAL_MS / 1000}s.`
+    `Starting Polymarket monitoring for ${walletDisplay} with interval ${
+      POLL_INTERVAL_MS / 1000
+    }s.`
   );
 
   await pollOnce();
@@ -215,11 +241,15 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  const content = message.content.trim().toLowerCase();
+  const content = message.content.trim();
+  const contentLower = content.toLowerCase();
 
-  if (content === START_COMMAND.toLowerCase()) {
-    await startPolling(message.channel);
-  } else if (content === STOP_COMMAND.toLowerCase()) {
+  if (contentLower.startsWith(START_COMMAND.toLowerCase())) {
+    // Parse wallet address from command: !start <wallet_address> or just !start
+    const parts = content.split(/\s+/);
+    const walletAddress = parts.length > 1 ? parts[1] : null;
+    await startPolling(message.channel, walletAddress);
+  } else if (contentLower === STOP_COMMAND.toLowerCase()) {
     await stopPolling(message.channel);
   }
 });
