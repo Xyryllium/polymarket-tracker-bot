@@ -75,20 +75,34 @@ if (POLYMARKET_PRIVATE_KEY) {
       const chainId = 137;
       const signer = new Wallet(POLYMARKET_PRIVATE_KEY);
 
+      logToFile("DEBUG", "Creating API credentials", {
+        hasFunder: !!POLYMARKET_FUNDER,
+        signatureType: POLYMARKET_SIGNATURE_TYPE,
+      });
+
+      const tempClient = new ClobClient(host, chainId, signer);
+      const creds = await tempClient.createOrDeriveApiKey();
+      logToFile("DEBUG", "API credentials created", {
+        credsType: typeof creds,
+      });
+
       if (POLYMARKET_FUNDER) {
-        clobClient = new ClobClient(host, chainId, signer, {
-          signatureType: POLYMARKET_SIGNATURE_TYPE,
-          funder: POLYMARKET_FUNDER,
-        });
+        clobClient = new ClobClient(
+          host,
+          chainId,
+          signer,
+          creds,
+          POLYMARKET_SIGNATURE_TYPE,
+          POLYMARKET_FUNDER
+        );
       } else {
-        clobClient = new ClobClient(host, chainId, signer);
+        clobClient = new ClobClient(host, chainId, signer, creds, 0);
       }
 
-      const apiKey = await clobClient.deriveApiKey();
-      clobClient.setApiCreds(apiKey);
       clobClientReady = true;
       logToFile("INFO", "CLOB client initialized successfully", {
         apiKeySet: true,
+        hasFunder: !!POLYMARKET_FUNDER,
       });
     } catch (error) {
       logToFile("ERROR", "Failed to initialize CLOB client", {
