@@ -5,8 +5,39 @@ const fetch = require("node-fetch");
 const { ClobClient } = require("@polymarket/clob-client");
 const { Wallet } = require("@ethersproject/wallet");
 const { Side, OrderType } = require("@polymarket/clob-client");
+const fs = require("fs");
+const path = require("path");
 
 const DEFAULT_WALLET = "0x0f37cb80dee49d55b5f6d9e595d52591d6371410";
+
+const LOG_FILE = path.join(__dirname, "bot.log");
+
+function logToFile(level, message, data = null) {
+  const timestamp = new Date().toISOString();
+  const logEntry = {
+    timestamp,
+    level,
+    message,
+    data,
+  };
+  const logLine = `[${timestamp}] [${level}] ${message}${
+    data ? ` | Data: ${JSON.stringify(data)}` : ""
+  }\n`;
+
+  try {
+    fs.appendFileSync(LOG_FILE, logLine);
+  } catch (error) {
+    console.error("Failed to write to log file:", error.message);
+  }
+
+  if (level === "ERROR") {
+    console.error(`[${level}] ${message}`, data || "");
+  } else if (level === "WARN") {
+    console.warn(`[${level}] ${message}`, data || "");
+  } else {
+    console.log(`[${level}] ${message}`, data || "");
+  }
+}
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 15000);
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -56,16 +87,21 @@ if (POLYMARKET_PRIVATE_KEY) {
       const apiKey = await clobClient.deriveApiKey();
       clobClient.setApiCreds(apiKey);
       clobClientReady = true;
-      console.log("CLOB client initialized successfully");
+      logToFile("INFO", "CLOB client initialized successfully", {
+        apiKeySet: true,
+      });
     } catch (error) {
-      console.error("Failed to initialize CLOB client:", error.message);
-      console.warn("Order placement features will be disabled");
+      logToFile("ERROR", "Failed to initialize CLOB client", {
+        error: error.message,
+        stack: error.stack,
+      });
       clobClient = null;
       clobClientReady = false;
     }
   })();
 } else {
-  console.warn(
+  logToFile(
+    "WARN",
     "POLYMARKET_PRIVATE_KEY not set. Order placement features disabled."
   );
 }
@@ -207,6 +243,25 @@ async function pollOnce() {
       try {
         await activeChannel.send({ content: `${mention}${message}` });
 
+        logToFile("INFO", "Trade detected", {
+          tradeSide,
+          market: title || slug,
+          outcome,
+          price,
+          size,
+          conditionId,
+          transactionHash,
+        });
+
+        const autoTradeCheck = {
+          AUTO_TRADE_ENABLED,
+          clobClient: !!clobClient,
+          clobClientReady,
+          conditionId: !!conditionId,
+          matchesFilter: matchesAutoTradeFilter(trade),
+        };
+        logToFile("DEBUG", "Auto-trade check", autoTradeCheck);
+
         if (
           AUTO_TRADE_ENABLED &&
           clobClient &&
@@ -216,6 +271,7 @@ async function pollOnce() {
         ) {
           try {
             if (!price || price <= 0) {
+              logToFile("WARN", "Cannot auto-trade: Invalid price", { price });
               await activeChannel.send(
                 `⚠️ Cannot auto-trade: Invalid price (${price}). Skipping trade.`
               );
@@ -225,6 +281,14 @@ async function pollOnce() {
             const tokenId = conditionId;
             const orderPrice = price;
 
+            logToFile("INFO", "Attempting auto-trade", {
+              tradeSide,
+              tokenId,
+              orderPrice,
+              orderType: AUTO_TRADE_USE_MARKET ? "MARKET" : "LIMIT",
+              amountUSD: AUTO_TRADE_AMOUNT_USD,
+            });
+
             if (AUTO_TRADE_USE_MARKET) {
               if (tradeSide === "BUY") {
                 const orderResponse = await placeMarketBuyOrder(
@@ -232,6 +296,7 @@ async function pollOnce() {
                   AUTO_TRADE_AMOUNT_USD,
                   orderPrice
                 );
+                logToFile("INFO", "Market BUY order response", orderResponse);
                 await activeChannel.send(
                   `✅ Auto-placed MARKET BUY order: $${AUTO_TRADE_AMOUNT_USD} @ market price: ${
                     orderResponse.success
@@ -246,6 +311,7 @@ async function pollOnce() {
                   orderSize,
                   orderPrice
                 );
+                logToFile("INFO", "Market SELL order response", orderResponse);
                 await activeChannel.send(
                   `✅ Auto-placed MARKET SELL order: $${AUTO_TRADE_AMOUNT_USD} (${orderSize.toFixed(
                     2
@@ -262,11 +328,17 @@ async function pollOnce() {
               orderSize = Math.round(orderSize * 100) / 100;
 
               if (tradeSide === "BUY") {
+                logToFile("INFO", "Placing limit BUY order", {
+                  tokenId,
+                  orderPrice,
+                  orderSize,
+                });
                 const orderResponse = await placeBuyOrder(
                   tokenId,
                   orderPrice,
                   orderSize
                 );
+                logToFile("INFO", "Limit BUY order response", orderResponse);
                 await activeChannel.send(
                   `✅ Auto-placed LIMIT BUY order: $${AUTO_TRADE_AMOUNT_USD} (${orderSize} shares @ ${orderPrice}): ${
                     orderResponse.success
@@ -275,11 +347,17 @@ async function pollOnce() {
                   }`
                 );
               } else if (tradeSide === "SELL") {
+                logToFile("INFO", "Placing limit SELL order", {
+                  tokenId,
+                  orderPrice,
+                  orderSize,
+                });
                 const orderResponse = await placeSellOrder(
                   tokenId,
                   orderPrice,
                   orderSize
                 );
+                logToFile("INFO", "Limit SELL order response", orderResponse);
                 await activeChannel.send(
                   `✅ Auto-placed LIMIT SELL order: $${AUTO_TRADE_AMOUNT_USD} (${orderSize} shares @ ${orderPrice}): ${
                     orderResponse.success
@@ -290,21 +368,46 @@ async function pollOnce() {
               }
             }
           } catch (tradeError) {
-            console.error("Auto-trade error:", tradeError.message);
+            logToFile("ERROR", "Auto-trade error", {
+              error: tradeError.message,
+              stack: tradeError.stack,
+              tradeSide,
+              tokenId: conditionId,
+              price,
+            });
             await activeChannel.send(
               `⚠️ Auto-trade failed: ${tradeError.message}`
             );
           }
-        } else if (
-          AUTO_TRADE_ENABLED &&
-          clobClient &&
-          clobClientReady &&
-          conditionId &&
-          !matchesAutoTradeFilter(trade)
-        ) {
-          console.log(
-            `Auto-trade skipped: Trade does not match filter "${AUTO_TRADE_FILTER}"`
-          );
+        } else {
+          const skipReason = !AUTO_TRADE_ENABLED
+            ? "AUTO_TRADE_ENABLED is false"
+            : !clobClient
+            ? "CLOB client not initialized"
+            : !clobClientReady
+            ? "CLOB client not ready (API credentials not set)"
+            : !conditionId
+            ? "No conditionId in trade"
+            : !matchesAutoTradeFilter(trade)
+            ? `Trade does not match filter "${AUTO_TRADE_FILTER}"`
+            : "Unknown reason";
+
+          logToFile("DEBUG", "Auto-trade skipped", {
+            reason: skipReason,
+            autoTradeCheck,
+          });
+
+          if (
+            AUTO_TRADE_ENABLED &&
+            clobClient &&
+            clobClientReady &&
+            conditionId &&
+            !matchesAutoTradeFilter(trade)
+          ) {
+            console.log(
+              `Auto-trade skipped: Trade does not match filter "${AUTO_TRADE_FILTER}"`
+            );
+          }
         }
       } catch (error) {
         console.error("Failed to send message to Discord", error);
@@ -344,12 +447,19 @@ function matchesAutoTradeFilter(trade) {
 
 async function placeBuyOrder(tokenId, price, size, orderType = OrderType.GTC) {
   if (!clobClient || !clobClientReady) {
-    throw new Error(
-      "CLOB client not initialized or API credentials not set. Please wait for initialization to complete."
-    );
+    const error =
+      "CLOB client not initialized or API credentials not set. Please wait for initialization to complete.";
+    logToFile("ERROR", "placeBuyOrder failed", { error, tokenId, price, size });
+    throw new Error(error);
   }
 
   try {
+    logToFile("DEBUG", "Creating buy order", {
+      tokenId,
+      price,
+      size,
+      orderType,
+    });
     const order = await clobClient.createOrder({
       tokenID: tokenId,
       price: price,
@@ -359,21 +469,42 @@ async function placeBuyOrder(tokenId, price, size, orderType = OrderType.GTC) {
       nonce: Date.now(),
     });
 
+    logToFile("DEBUG", "Posting buy order", { orderId: order?.salt });
     const response = await clobClient.postOrder(order, orderType);
+    logToFile("INFO", "Buy order placed", { response });
     return response;
   } catch (error) {
+    logToFile("ERROR", "Failed to place buy order", {
+      error: error.message,
+      stack: error.stack,
+      tokenId,
+      price,
+      size,
+    });
     throw new Error(`Failed to place buy order: ${error.message}`);
   }
 }
 
 async function placeSellOrder(tokenId, price, size, orderType = OrderType.GTC) {
   if (!clobClient || !clobClientReady) {
-    throw new Error(
-      "CLOB client not initialized or API credentials not set. Please wait for initialization to complete."
-    );
+    const error =
+      "CLOB client not initialized or API credentials not set. Please wait for initialization to complete.";
+    logToFile("ERROR", "placeSellOrder failed", {
+      error,
+      tokenId,
+      price,
+      size,
+    });
+    throw new Error(error);
   }
 
   try {
+    logToFile("DEBUG", "Creating sell order", {
+      tokenId,
+      price,
+      size,
+      orderType,
+    });
     const order = await clobClient.createOrder({
       tokenID: tokenId,
       price: price,
@@ -383,21 +514,37 @@ async function placeSellOrder(tokenId, price, size, orderType = OrderType.GTC) {
       nonce: Date.now(),
     });
 
+    logToFile("DEBUG", "Posting sell order", { orderId: order?.salt });
     const response = await clobClient.postOrder(order, orderType);
+    logToFile("INFO", "Sell order placed", { response });
     return response;
   } catch (error) {
+    logToFile("ERROR", "Failed to place sell order", {
+      error: error.message,
+      stack: error.stack,
+      tokenId,
+      price,
+      size,
+    });
     throw new Error(`Failed to place sell order: ${error.message}`);
   }
 }
 
 async function placeMarketBuyOrder(tokenId, amount, price) {
   if (!clobClient || !clobClientReady) {
-    throw new Error(
-      "CLOB client not initialized or API credentials not set. Please wait for initialization to complete."
-    );
+    const error =
+      "CLOB client not initialized or API credentials not set. Please wait for initialization to complete.";
+    logToFile("ERROR", "placeMarketBuyOrder failed", {
+      error,
+      tokenId,
+      amount,
+      price,
+    });
+    throw new Error(error);
   }
 
   try {
+    logToFile("DEBUG", "Creating market buy order", { tokenId, amount, price });
     const order = await clobClient.createMarketOrder({
       side: Side.BUY,
       tokenID: tokenId,
@@ -407,21 +554,41 @@ async function placeMarketBuyOrder(tokenId, amount, price) {
       price: price,
     });
 
+    logToFile("DEBUG", "Posting market buy order", { orderId: order?.salt });
     const response = await clobClient.postOrder(order, OrderType.FOK);
+    logToFile("INFO", "Market buy order placed", { response });
     return response;
   } catch (error) {
+    logToFile("ERROR", "Failed to place market buy order", {
+      error: error.message,
+      stack: error.stack,
+      tokenId,
+      amount,
+      price,
+    });
     throw new Error(`Failed to place market buy order: ${error.message}`);
   }
 }
 
 async function placeMarketSellOrder(tokenId, amount, price) {
   if (!clobClient || !clobClientReady) {
-    throw new Error(
-      "CLOB client not initialized or API credentials not set. Please wait for initialization to complete."
-    );
+    const error =
+      "CLOB client not initialized or API credentials not set. Please wait for initialization to complete.";
+    logToFile("ERROR", "placeMarketSellOrder failed", {
+      error,
+      tokenId,
+      amount,
+      price,
+    });
+    throw new Error(error);
   }
 
   try {
+    logToFile("DEBUG", "Creating market sell order", {
+      tokenId,
+      amount,
+      price,
+    });
     const order = await clobClient.createMarketOrder({
       side: Side.SELL,
       tokenID: tokenId,
@@ -431,9 +598,18 @@ async function placeMarketSellOrder(tokenId, amount, price) {
       price: price,
     });
 
+    logToFile("DEBUG", "Posting market sell order", { orderId: order?.salt });
     const response = await clobClient.postOrder(order, OrderType.FOK);
+    logToFile("INFO", "Market sell order placed", { response });
     return response;
   } catch (error) {
+    logToFile("ERROR", "Failed to place market sell order", {
+      error: error.message,
+      stack: error.stack,
+      tokenId,
+      amount,
+      price,
+    });
     throw new Error(`Failed to place market sell order: ${error.message}`);
   }
 }
@@ -512,6 +688,7 @@ async function stopPolling(channel) {
 }
 
 client.once("ready", async () => {
+  logToFile("INFO", "Discord bot ready", { botTag: client.user.tag });
   console.log(`Logged in as ${client.user.tag}`);
   console.log(
     `Ready for commands. Type ${START_COMMAND} in any text channel the bot can access to begin monitoring.`
