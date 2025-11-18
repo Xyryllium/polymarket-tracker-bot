@@ -246,6 +246,11 @@ async function pollOnce() {
         slug,
         side,
         conditionId,
+        orderType,
+        type,
+        fillType,
+        isMarketOrder,
+        marketOrder,
       } = trade;
 
       const tradeSide = String(side).toUpperCase();
@@ -253,9 +258,27 @@ async function pollOnce() {
       const formattedPrice = priceInCents != null ? `${priceInCents}¢` : "N/A";
       const discordTimestamp = timestamp != null ? `<t:${timestamp}:f>` : "N/A";
 
+      let detectedOrderType = "UNKNOWN";
+      if (orderType) {
+        detectedOrderType = String(orderType).toUpperCase();
+      } else if (fillType) {
+        detectedOrderType = String(fillType).toUpperCase();
+      } else if (isMarketOrder !== undefined) {
+        detectedOrderType = isMarketOrder ? "MARKET" : "LIMIT";
+      } else if (marketOrder !== undefined) {
+        detectedOrderType = marketOrder ? "MARKET" : "LIMIT";
+      } else {
+        logToFile("DEBUG", "Trade object fields", {
+          allFields: Object.keys(trade),
+          tradeSample: JSON.stringify(trade).substring(0, 500),
+        });
+      }
+
       const mention = ALERT_ROLE_ID ? `<@&${ALERT_ROLE_ID}> ` : "";
+      const orderTypeDisplay =
+        detectedOrderType !== "UNKNOWN" ? ` (${detectedOrderType})` : "";
       const message = [
-        `**New Polymarket ${tradeSide}**`,
+        `**New Polymarket ${tradeSide}${orderTypeDisplay}**`,
         `Market: ${title ?? slug ?? "Unknown market"}`,
         `Outcome: ${outcome ?? "Unknown"} @ ${formattedPrice}`,
         `Size: ${size ?? "?"} shares (~${usdcSize ?? "?"} USDC)`,
@@ -279,6 +302,8 @@ async function pollOnce() {
           size,
           conditionId,
           transactionHash,
+          orderType: detectedOrderType,
+          allTradeFields: Object.keys(trade),
         });
 
         const autoTradeCheck = {
@@ -309,15 +334,19 @@ async function pollOnce() {
             const tokenId = conditionId;
             const orderPrice = price;
 
+            const useMarketOrder =
+              AUTO_TRADE_USE_MARKET || detectedOrderType === "MARKET";
+
             logToFile("INFO", "Attempting auto-trade", {
               tradeSide,
               tokenId,
               orderPrice,
-              orderType: AUTO_TRADE_USE_MARKET ? "MARKET" : "LIMIT",
+              orderType: useMarketOrder ? "MARKET" : "LIMIT",
+              detectedOrderType,
               amountUSD: AUTO_TRADE_AMOUNT_USD,
             });
 
-            if (AUTO_TRADE_USE_MARKET) {
+            if (useMarketOrder) {
               if (tradeSide === "BUY") {
                 const orderResponse = await placeMarketBuyOrder(
                   tokenId,
@@ -333,7 +362,35 @@ async function pollOnce() {
                   }`
                 );
               } else if (tradeSide === "SELL") {
-                const orderSize = AUTO_TRADE_AMOUNT_USD / orderPrice;
+                const MIN_ORDER_SIZE = 5;
+                let orderSize = AUTO_TRADE_AMOUNT_USD / orderPrice;
+
+                if (orderSize < MIN_ORDER_SIZE) {
+                  const calculatedSize = orderSize;
+                  const actualCost = MIN_ORDER_SIZE * orderPrice;
+                  logToFile(
+                    "WARN",
+                    "Market SELL order size below minimum, increasing to 5 shares",
+                    {
+                      calculatedSize: calculatedSize,
+                      minSize: MIN_ORDER_SIZE,
+                      requestedAmount: AUTO_TRADE_AMOUNT_USD,
+                      actualCost: actualCost,
+                      orderPrice,
+                    }
+                  );
+                  orderSize = MIN_ORDER_SIZE;
+                  await activeChannel.send(
+                    `⚠️ Calculated order size (${calculatedSize.toFixed(
+                      2
+                    )} shares) is below Polymarket's minimum of ${MIN_ORDER_SIZE} shares. Increasing to ${MIN_ORDER_SIZE} shares (value: $${actualCost.toFixed(
+                      2
+                    )} instead of $${AUTO_TRADE_AMOUNT_USD}).`
+                  );
+                }
+
+                orderSize = Math.round(orderSize * 100) / 100;
+
                 const orderResponse = await placeMarketSellOrder(
                   tokenId,
                   orderSize,
@@ -351,8 +408,33 @@ async function pollOnce() {
                 );
               }
             } else {
+              const MIN_ORDER_SIZE = 5;
               let orderSize = AUTO_TRADE_AMOUNT_USD / orderPrice;
-              orderSize = Math.max(orderSize, 0.01);
+
+              if (orderSize < MIN_ORDER_SIZE) {
+                const calculatedSize = orderSize;
+                const actualCost = MIN_ORDER_SIZE * orderPrice;
+                logToFile(
+                  "WARN",
+                  "Order size below minimum, increasing to 5 shares",
+                  {
+                    calculatedSize: calculatedSize,
+                    minSize: MIN_ORDER_SIZE,
+                    requestedAmount: AUTO_TRADE_AMOUNT_USD,
+                    actualCost: actualCost,
+                    orderPrice,
+                  }
+                );
+                orderSize = MIN_ORDER_SIZE;
+                await activeChannel.send(
+                  `⚠️ Calculated order size (${calculatedSize.toFixed(
+                    2
+                  )} shares) is below Polymarket's minimum of ${MIN_ORDER_SIZE} shares. Increasing to ${MIN_ORDER_SIZE} shares (cost: $${actualCost.toFixed(
+                    2
+                  )} instead of $${AUTO_TRADE_AMOUNT_USD}).`
+                );
+              }
+
               orderSize = Math.round(orderSize * 100) / 100;
 
               if (tradeSide === "BUY") {
@@ -515,12 +597,32 @@ async function placeBuyOrder(tokenId, price, size, orderType = OrderType.GTC) {
     });
 
     logToFile("DEBUG", "Posting buy order", { orderId: order?.salt });
-    const response = await clobClient.postOrder(order, orderType);
+    let response;
+    try {
+      response = await clobClient.postOrder(order, orderType);
+    } catch (postError) {
+      if (
+        postError &&
+        postError.message &&
+        isCloudflareBlock(postError.message)
+      ) {
+        const errorMsg =
+          "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
+        logToFile("ERROR", "Cloudflare block detected (from error)", {
+          tokenId,
+          price,
+          size,
+          errorMessage: postError.message.substring(0, 200),
+        });
+        throw new Error(errorMsg);
+      }
+      throw postError;
+    }
 
     if (isCloudflareBlock(response)) {
       const errorMsg =
         "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
-      logToFile("ERROR", "Cloudflare block detected", {
+      logToFile("ERROR", "Cloudflare block detected (from response)", {
         tokenId,
         price,
         size,
@@ -538,6 +640,17 @@ async function placeBuyOrder(tokenId, price, size, orderType = OrderType.GTC) {
   } catch (error) {
     if (error.message && error.message.includes("Cloudflare")) {
       throw error;
+    }
+    if (error.message && isCloudflareBlock(error.message)) {
+      const errorMsg =
+        "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
+      logToFile("ERROR", "Cloudflare block detected (from catch)", {
+        tokenId,
+        price,
+        size,
+        errorMessage: error.message.substring(0, 200),
+      });
+      throw new Error(errorMsg);
     }
     logToFile("ERROR", "Failed to place buy order", {
       error: error.message,
@@ -580,12 +693,32 @@ async function placeSellOrder(tokenId, price, size, orderType = OrderType.GTC) {
     });
 
     logToFile("DEBUG", "Posting sell order", { orderId: order?.salt });
-    const response = await clobClient.postOrder(order, orderType);
+    let response;
+    try {
+      response = await clobClient.postOrder(order, orderType);
+    } catch (postError) {
+      if (
+        postError &&
+        postError.message &&
+        isCloudflareBlock(postError.message)
+      ) {
+        const errorMsg =
+          "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
+        logToFile("ERROR", "Cloudflare block detected (from error)", {
+          tokenId,
+          price,
+          size,
+          errorMessage: postError.message.substring(0, 200),
+        });
+        throw new Error(errorMsg);
+      }
+      throw postError;
+    }
 
     if (isCloudflareBlock(response)) {
       const errorMsg =
         "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
-      logToFile("ERROR", "Cloudflare block detected", {
+      logToFile("ERROR", "Cloudflare block detected (from response)", {
         tokenId,
         price,
         size,
@@ -603,6 +736,17 @@ async function placeSellOrder(tokenId, price, size, orderType = OrderType.GTC) {
   } catch (error) {
     if (error.message && error.message.includes("Cloudflare")) {
       throw error;
+    }
+    if (error.message && isCloudflareBlock(error.message)) {
+      const errorMsg =
+        "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
+      logToFile("ERROR", "Cloudflare block detected (from catch)", {
+        tokenId,
+        price,
+        size,
+        errorMessage: error.message.substring(0, 200),
+      });
+      throw new Error(errorMsg);
     }
     logToFile("ERROR", "Failed to place sell order", {
       error: error.message,
@@ -640,12 +784,32 @@ async function placeMarketBuyOrder(tokenId, amount, price) {
     });
 
     logToFile("DEBUG", "Posting market buy order", { orderId: order?.salt });
-    const response = await clobClient.postOrder(order, OrderType.FOK);
+    let response;
+    try {
+      response = await clobClient.postOrder(order, OrderType.FOK);
+    } catch (postError) {
+      if (
+        postError &&
+        postError.message &&
+        isCloudflareBlock(postError.message)
+      ) {
+        const errorMsg =
+          "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
+        logToFile("ERROR", "Cloudflare block detected (from error)", {
+          tokenId,
+          amount,
+          price,
+          errorMessage: postError.message.substring(0, 200),
+        });
+        throw new Error(errorMsg);
+      }
+      throw postError;
+    }
 
     if (isCloudflareBlock(response)) {
       const errorMsg =
         "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
-      logToFile("ERROR", "Cloudflare block detected", {
+      logToFile("ERROR", "Cloudflare block detected (from response)", {
         tokenId,
         amount,
         price,
@@ -701,12 +865,32 @@ async function placeMarketSellOrder(tokenId, amount, price) {
     });
 
     logToFile("DEBUG", "Posting market sell order", { orderId: order?.salt });
-    const response = await clobClient.postOrder(order, OrderType.FOK);
+    let response;
+    try {
+      response = await clobClient.postOrder(order, OrderType.FOK);
+    } catch (postError) {
+      if (
+        postError &&
+        postError.message &&
+        isCloudflareBlock(postError.message)
+      ) {
+        const errorMsg =
+          "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
+        logToFile("ERROR", "Cloudflare block detected (from error)", {
+          tokenId,
+          amount,
+          price,
+          errorMessage: postError.message.substring(0, 200),
+        });
+        throw new Error(errorMsg);
+      }
+      throw postError;
+    }
 
     if (isCloudflareBlock(response)) {
       const errorMsg =
         "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
-      logToFile("ERROR", "Cloudflare block detected", {
+      logToFile("ERROR", "Cloudflare block detected (from response)", {
         tokenId,
         amount,
         price,
