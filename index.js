@@ -473,6 +473,23 @@ function matchesAutoTradeFilter(trade) {
   return keywords.some((keyword) => searchText.includes(keyword));
 }
 
+function isCloudflareBlock(response) {
+  if (!response) return false;
+  if (typeof response === "string") {
+    return (
+      response.includes("Cloudflare") || response.includes("Attention Required")
+    );
+  }
+  if (typeof response === "object") {
+    const responseStr = JSON.stringify(response);
+    return (
+      responseStr.includes("Cloudflare") ||
+      responseStr.includes("Attention Required")
+    );
+  }
+  return false;
+}
+
 async function placeBuyOrder(tokenId, price, size, orderType = OrderType.GTC) {
   if (!clobClient || !clobClientReady) {
     const error =
@@ -499,9 +516,29 @@ async function placeBuyOrder(tokenId, price, size, orderType = OrderType.GTC) {
 
     logToFile("DEBUG", "Posting buy order", { orderId: order?.salt });
     const response = await clobClient.postOrder(order, orderType);
+
+    if (isCloudflareBlock(response)) {
+      const errorMsg =
+        "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
+      logToFile("ERROR", "Cloudflare block detected", {
+        tokenId,
+        price,
+        size,
+        responseType: typeof response,
+        responsePreview:
+          typeof response === "string"
+            ? response.substring(0, 200)
+            : JSON.stringify(response).substring(0, 200),
+      });
+      throw new Error(errorMsg);
+    }
+
     logToFile("INFO", "Buy order placed", { response });
     return response;
   } catch (error) {
+    if (error.message && error.message.includes("Cloudflare")) {
+      throw error;
+    }
     logToFile("ERROR", "Failed to place buy order", {
       error: error.message,
       stack: error.stack,
@@ -544,9 +581,29 @@ async function placeSellOrder(tokenId, price, size, orderType = OrderType.GTC) {
 
     logToFile("DEBUG", "Posting sell order", { orderId: order?.salt });
     const response = await clobClient.postOrder(order, orderType);
+
+    if (isCloudflareBlock(response)) {
+      const errorMsg =
+        "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
+      logToFile("ERROR", "Cloudflare block detected", {
+        tokenId,
+        price,
+        size,
+        responseType: typeof response,
+        responsePreview:
+          typeof response === "string"
+            ? response.substring(0, 200)
+            : JSON.stringify(response).substring(0, 200),
+      });
+      throw new Error(errorMsg);
+    }
+
     logToFile("INFO", "Sell order placed", { response });
     return response;
   } catch (error) {
+    if (error.message && error.message.includes("Cloudflare")) {
+      throw error;
+    }
     logToFile("ERROR", "Failed to place sell order", {
       error: error.message,
       stack: error.stack,
@@ -584,6 +641,23 @@ async function placeMarketBuyOrder(tokenId, amount, price) {
 
     logToFile("DEBUG", "Posting market buy order", { orderId: order?.salt });
     const response = await clobClient.postOrder(order, OrderType.FOK);
+
+    if (isCloudflareBlock(response)) {
+      const errorMsg =
+        "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
+      logToFile("ERROR", "Cloudflare block detected", {
+        tokenId,
+        amount,
+        price,
+        responseType: typeof response,
+        responsePreview:
+          typeof response === "string"
+            ? response.substring(0, 200)
+            : JSON.stringify(response).substring(0, 200),
+      });
+      throw new Error(errorMsg);
+    }
+
     logToFile("INFO", "Market buy order placed", { response });
     return response;
   } catch (error) {
@@ -628,6 +702,23 @@ async function placeMarketSellOrder(tokenId, amount, price) {
 
     logToFile("DEBUG", "Posting market sell order", { orderId: order?.salt });
     const response = await clobClient.postOrder(order, OrderType.FOK);
+
+    if (isCloudflareBlock(response)) {
+      const errorMsg =
+        "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
+      logToFile("ERROR", "Cloudflare block detected", {
+        tokenId,
+        amount,
+        price,
+        responseType: typeof response,
+        responsePreview:
+          typeof response === "string"
+            ? response.substring(0, 200)
+            : JSON.stringify(response).substring(0, 200),
+      });
+      throw new Error(errorMsg);
+    }
+
     logToFile("INFO", "Market sell order placed", { response });
     return response;
   } catch (error) {
