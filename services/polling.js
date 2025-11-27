@@ -23,6 +23,11 @@ const {
   MAX_ORDER_VALUE_USD,
   MAX_POSITIONS,
   MAX_TOTAL_EXPOSURE_USD,
+  ADD_HIGH_CONFIDENCE_ENABLED,
+  ADD_HIGH_CONFIDENCE_MIN,
+  ADD_HIGH_CONFIDENCE_MAX,
+  ADD_HIGH_CONFIDENCE_SIZE_USD,
+  USE_HALF_SIZE_INITIAL_TRADES,
   START_COMMAND,
   STOP_COMMAND,
 } = require("../config");
@@ -40,6 +45,11 @@ const {
   checkPositionLimits,
   setTrackedPosition,
   deleteTrackedPosition,
+  hasHighConfidenceAddBeenPlaced,
+  markHighConfidenceAddPlaced,
+  hasInitialTradeBeenPlaced,
+  markInitialTradePlaced,
+  recordBuyTrade,
 } = require("./positions");
 const { paperBuy, paperSell, getPaperTradingState } = require("./paperTrading");
 const {
@@ -48,6 +58,17 @@ const {
   placeMarketBuyOrder,
   placeMarketSellOrder,
 } = require("./orders");
+const {
+  setStopLossOrder,
+  getStopLossOrder,
+  deleteStopLossOrder,
+  setStopLossPosition, // For WebSocket monitoring
+} = require("./positions");
+const {
+  STOP_LOSS_ENABLED,
+  STOP_LOSS_PERCENTAGE,
+  STOP_LOSS_WEBSOCKET_MARKET_FILTER,
+} = require("../config");
 const {
   checkAndSettleResolvedMarkets,
   checkStopLossForRealPositions,
@@ -104,6 +125,176 @@ async function pollOnce(
   try {
     if (!activeChannel) {
       return;
+    }
+
+    // TODO: Still bugged on active hourly event changes - need to rework logic
+    if (STOP_LOSS_ENABLED && !PAPER_TRADING_ENABLED && orderbookWS) {
+      try {
+        const {
+          getAllStopLossPositions,
+          deleteStopLossPosition,
+        } = require("./positions");
+        const allPositions = getAllStopLossPositions();
+
+        if (allPositions.size > 0) {
+          const activities = await fetchLatestActivity(currentWallet);
+          const recentTrades = activities.filter(
+            (item) =>
+              item?.type === "TRADE" &&
+              (String(item?.side).toUpperCase() === "BUY" ||
+                String(item?.side).toUpperCase() === "SELL") &&
+              item?.conditionId
+          );
+
+          logToFile("DEBUG", "Proactive hourly event cleanup check", {
+            monitoredPositions: allPositions.size,
+            recentTradesWithConditionId: recentTrades.length,
+            positionDetails: Array.from(allPositions.entries()).map(
+              ([tokenId, pos]) => ({
+                tokenId: tokenId.substring(0, 10) + "...",
+                conditionId: pos.conditionId
+                  ? pos.conditionId.substring(0, 10) + "..."
+                  : null,
+                market: pos.market,
+              })
+            ),
+          });
+
+          const marketTypeToConditionIds = new Map();
+          for (const trade of recentTrades) {
+            const { title, slug, conditionId, timestamp } = trade;
+            if (!conditionId) continue;
+
+            const marketTypeMatch = (title || slug || "").match(/^([^-]+)/);
+            const marketType = marketTypeMatch
+              ? marketTypeMatch[1].trim()
+              : null;
+
+            if (marketType) {
+              if (!marketTypeToConditionIds.has(marketType)) {
+                marketTypeToConditionIds.set(marketType, new Map());
+              }
+              const conditionIdMap = marketTypeToConditionIds.get(marketType);
+              const existing = conditionIdMap.get(conditionId);
+              if (
+                !existing ||
+                (timestamp &&
+                  existing.timestamp &&
+                  timestamp > existing.timestamp)
+              ) {
+                conditionIdMap.set(conditionId, {
+                  conditionId,
+                  timestamp: timestamp || 0,
+                });
+              }
+            }
+          }
+
+          for (const [tokenId, position] of allPositions.entries()) {
+            if (!position.conditionId || !position.market) continue;
+            const marketTypeMatch = position.market.match(/^([^-]+)/);
+            const marketType = marketTypeMatch
+              ? marketTypeMatch[1].trim()
+              : null;
+
+            if (marketType) {
+              const conditionIdMap = marketTypeToConditionIds.get(marketType);
+              if (conditionIdMap && conditionIdMap.size > 0) {
+                const storedConditionId = position.conditionId
+                  ? position.conditionId.toLowerCase()
+                  : null;
+
+                const hasDifferentConditionId = Array.from(
+                  conditionIdMap.keys()
+                ).some((cid) => cid.toLowerCase() !== storedConditionId);
+
+                if (hasDifferentConditionId) {
+                  let latestEvent = null;
+                  for (const event of conditionIdMap.values()) {
+                    if (event.conditionId.toLowerCase() !== storedConditionId) {
+                      if (
+                        !latestEvent ||
+                        (event.timestamp &&
+                          latestEvent.timestamp &&
+                          event.timestamp > latestEvent.timestamp)
+                      ) {
+                        latestEvent = event;
+                      }
+                    }
+                  }
+
+                  if (latestEvent) {
+                    logToFile(
+                      "INFO",
+                      "Cleaning up old hourly event subscription - detected new event in recent trades",
+                      {
+                        oldTokenId: tokenId.substring(0, 10) + "...",
+                        oldConditionId:
+                          position.conditionId.substring(0, 10) + "...",
+                        newConditionId:
+                          latestEvent.conditionId.substring(0, 10) + "...",
+                        marketType,
+                      }
+                    );
+                    orderbookWS.unsubscribe(tokenId);
+                    deleteStopLossPosition(tokenId);
+                  } else {
+                    logToFile("DEBUG", "No latest event found for cleanup", {
+                      tokenId: tokenId.substring(0, 10) + "...",
+                      positionConditionId: position.conditionId
+                        ? position.conditionId.substring(0, 10) + "..."
+                        : null,
+                      marketType,
+                      conditionIdsInMap: Array.from(conditionIdMap.keys()).map(
+                        (cid) => cid.substring(0, 10) + "..."
+                      ),
+                    });
+                  }
+                } else {
+                  logToFile(
+                    "DEBUG",
+                    "No different conditionId found for market type",
+                    {
+                      tokenId: tokenId.substring(0, 10) + "...",
+                      positionConditionId: position.conditionId
+                        ? position.conditionId.substring(0, 10) + "..."
+                        : null,
+                      marketType,
+                      conditionIdsInMap: Array.from(conditionIdMap.keys()).map(
+                        (cid) => cid.substring(0, 10) + "..."
+                      ),
+                    }
+                  );
+                }
+              } else {
+                logToFile("DEBUG", "No conditionId map found for market type", {
+                  tokenId: tokenId.substring(0, 10) + "...",
+                  marketType,
+                  availableMarketTypes: Array.from(
+                    marketTypeToConditionIds.keys()
+                  ),
+                });
+              }
+            } else {
+              logToFile(
+                "DEBUG",
+                "Could not extract market type from position",
+                {
+                  tokenId: tokenId.substring(0, 10) + "...",
+                  market: position.market,
+                }
+              );
+            }
+          }
+        } else {
+          logToFile("DEBUG", "No stop-loss positions to check for cleanup", {});
+        }
+      } catch (cleanupError) {
+        logToFile("ERROR", "Error during proactive hourly event cleanup", {
+          error: cleanupError.message,
+          stack: cleanupError.stack,
+        });
+      }
     }
 
     const activities = await fetchLatestActivity(currentWallet);
@@ -258,6 +449,15 @@ async function pollOnce(
           orderType: detectedOrderType,
           allTradeFields: Object.keys(trade),
         });
+        if (
+          tradeSide === "BUY" &&
+          conditionId &&
+          asset &&
+          outcome &&
+          PAPER_TRADING_ENABLED
+        ) {
+          recordBuyTrade(conditionId, asset, outcome, price);
+        }
 
         const trackedTradeSize = usdcSize || 0;
         const tradePrice = price || 0;
@@ -363,10 +563,120 @@ async function pollOnce(
           const orderPrice = price;
           const MIN_ORDER_VALUE_USD = AUTO_TRADE_AMOUNT_USD;
 
+          if (
+            tokenId &&
+            tradeSide === "BUY" &&
+            MAX_BET_AMOUNT_PER_MARKET_USD > 0
+          ) {
+            let currentPositionValue = 0;
+            if (PAPER_TRADING_ENABLED) {
+              const paperPos = paperTradingState.positions[tokenId];
+              if (paperPos) {
+                currentPositionValue = paperPos.entryValue || 0;
+              }
+            } else {
+              currentPositionValue = await getPositionValueForToken(tokenId);
+            }
+
+            const maxBetAmount =
+              MAX_BET_AMOUNT_PER_MARKET_USD > 0
+                ? MAX_BET_AMOUNT_PER_MARKET_USD
+                : MAX_ORDER_VALUE_USD;
+
+            if (currentPositionValue >= maxBetAmount) {
+              logToFile(
+                "INFO",
+                "Auto-trade skipped: Position already at max bet amount (early check)",
+                {
+                  conditionId,
+                  tokenId,
+                  market: title || slug,
+                  currentPositionValue,
+                  maxBetAmount,
+                }
+              );
+              await activeChannel.send({
+                embeds: [
+                  {
+                    title: "⏸️ Auto-trade Skipped",
+                    description: `Market "${
+                      title || slug
+                    }" already at max bet amount per position.`,
+                    color: 0xffaa00,
+                    fields: [
+                      {
+                        name: "Current Position",
+                        value: `$${currentPositionValue.toFixed(2)}`,
+                        inline: true,
+                      },
+                      {
+                        name: "Max Bet Amount",
+                        value: `$${maxBetAmount.toFixed(2)}`,
+                        inline: true,
+                      },
+                    ],
+                    timestamp: new Date().toISOString(),
+                  },
+                ],
+              });
+              continue;
+            }
+          }
+
           const trackedShareSize = size || 0;
           let orderSize = 0;
           let orderValue = 0;
           let confidenceLevel = "MEDIUM";
+
+          const isHighConfidenceAdd =
+            ADD_HIGH_CONFIDENCE_ENABLED &&
+            tradePrice >= ADD_HIGH_CONFIDENCE_MIN &&
+            tradePrice <= ADD_HIGH_CONFIDENCE_MAX;
+
+          if (tradeSide === "BUY" && !isHighConfidenceAdd) {
+            if (hasInitialTradeBeenPlaced(tokenId)) {
+              logToFile(
+                "INFO",
+                "Auto-trade skipped: Already placed initial trade for this market, skipping 60-80% trade to leave room for high-confidence add",
+                {
+                  conditionId,
+                  tokenId,
+                  market: title || slug,
+                  outcome,
+                  tradePrice: tradePrice * 100,
+                  confidenceRange: "60-80%",
+                }
+              );
+              await activeChannel.send({
+                embeds: [
+                  {
+                    title: "⏸️ Auto-trade Skipped",
+                    description: `Already placed initial trade for this market. Skipping 60-80% trade to leave room for high-confidence add (80-90%+).`,
+                    color: 0xffaa00,
+                    fields: [
+                      {
+                        name: "Market",
+                        value: title || slug || "Unknown",
+                        inline: false,
+                      },
+                      {
+                        name: "Outcome",
+                        value: outcome || "Unknown",
+                        inline: true,
+                      },
+                      {
+                        name: "Trade Confidence",
+                        value: `${(tradePrice * 100).toFixed(1)}%`,
+                        inline: true,
+                      },
+                    ],
+                    timestamp: new Date().toISOString(),
+                  },
+                ],
+              });
+              continue;
+            }
+          }
 
           if (tradeSide === "BUY") {
             const optimalMultiplier = isOptimalConfidenceRange
@@ -378,59 +688,149 @@ async function pollOnce(
                 ? MAX_BET_AMOUNT_PER_MARKET_USD
                 : MAX_ORDER_VALUE_USD;
 
-            if (trackedTradeSize >= HIGH_CONFIDENCE_THRESHOLD_USD) {
-              confidenceLevel = isOptimalConfidenceRange
-                ? "HIGH SIZE (OPTIMAL PRICE RANGE)"
-                : "HIGH SIZE";
+            if (isHighConfidenceAdd) {
+              const {
+                hasHighConfidenceAddBeenPlaced,
+                markHighConfidenceAddPlaced,
+              } = require("./positions");
 
-              orderValue = trackedTradeSize * optimalMultiplier;
-              orderValue = Math.min(orderValue, maxBetAmount);
-              orderSize = orderPrice > 0 ? orderValue / orderPrice : 0;
-              logToFile("INFO", "High confidence trade detected", {
-                trackedTradeSize,
-                confidenceLevel,
-                isOptimalRange: isOptimalConfidenceRange,
-                optimalMultiplier,
-                ourBetSize: orderValue,
-                maxBetAmount,
-              });
-            } else if (trackedTradeSize <= LOW_CONFIDENCE_THRESHOLD_USD) {
-              confidenceLevel = isOptimalConfidenceRange
-                ? "LOW SIZE (OPTIMAL PRICE RANGE)"
-                : "LOW SIZE";
-              orderValue = MIN_ORDER_VALUE_USD * optimalMultiplier;
-              orderValue = Math.min(orderValue, maxBetAmount);
-              orderSize = orderPrice > 0 ? orderValue / orderPrice : 0;
-              logToFile("INFO", "Low confidence trade detected", {
-                trackedTradeSize,
-                confidenceLevel,
-                isOptimalRange: isOptimalConfidenceRange,
-                optimalMultiplier,
-                ourBetSize: orderValue,
-                maxBetAmount,
-              });
-            } else {
-              confidenceLevel = isOptimalConfidenceRange
-                ? "MEDIUM SIZE (OPTIMAL PRICE RANGE)"
-                : "MEDIUM SIZE";
-              const scaleFactor =
-                (trackedTradeSize - LOW_CONFIDENCE_THRESHOLD_USD) /
-                (HIGH_CONFIDENCE_THRESHOLD_USD - LOW_CONFIDENCE_THRESHOLD_USD);
-              orderValue = Math.min(
-                (MIN_ORDER_VALUE_USD +
-                  scaleFactor * (maxBetAmount - MIN_ORDER_VALUE_USD)) *
-                  optimalMultiplier,
-                maxBetAmount
+              if (hasHighConfidenceAddBeenPlaced(tokenId)) {
+                logToFile(
+                  "INFO",
+                  "High-confidence add skipped: Already placed one for this market",
+                  {
+                    tokenId,
+                    conditionId,
+                    market: title || slug,
+                    outcome,
+                    tradePrice: tradePrice * 100,
+                    isHighConfidenceAdd: true,
+                  }
+                );
+                await activeChannel.send({
+                  embeds: [
+                    {
+                      title: "⏸️ High-Confidence Add Skipped",
+                      description: `Already placed one high-confidence add (80-90%+) for this market. Only one allowed per market.`,
+                      color: 0xffaa00,
+                      fields: [
+                        {
+                          name: "Market",
+                          value: title || slug || "Unknown",
+                          inline: false,
+                        },
+                        {
+                          name: "Outcome",
+                          value: outcome || "Unknown",
+                          inline: true,
+                        },
+                        {
+                          name: "Trade Confidence",
+                          value: `${(tradePrice * 100).toFixed(1)}%`,
+                          inline: true,
+                        },
+                      ],
+                      timestamp: new Date().toISOString(),
+                    },
+                  ],
+                });
+                continue;
+              }
+
+              confidenceLevel = "HIGH CONFIDENCE ADD (80-90%+)";
+
+              let currentPositionValue = 0;
+              if (PAPER_TRADING_ENABLED) {
+                const paperPos = paperTradingState.positions[tokenId];
+                if (paperPos) {
+                  currentPositionValue = paperPos.entryValue || 0;
+                }
+              } else {
+                currentPositionValue = await getPositionValueForToken(tokenId);
+              }
+
+              const remainingAmount = Math.max(
+                0,
+                maxBetAmount - currentPositionValue
               );
+
+              const highConfidenceMinOrder = Math.min(
+                ADD_HIGH_CONFIDENCE_SIZE_USD,
+                1
+              );
+
+              if (remainingAmount < highConfidenceMinOrder) {
+                logToFile(
+                  "INFO",
+                  "High-confidence add skipped: Insufficient room",
+                  {
+                    tradePrice: tradePrice * 100,
+                    confidenceLevel,
+                    addSize: ADD_HIGH_CONFIDENCE_SIZE_USD,
+                    currentPositionValue,
+                    maxBetAmount,
+                    remainingAmount,
+                    minOrderValue: highConfidenceMinOrder,
+                    isHighConfidenceAdd: true,
+                  }
+                );
+                orderValue = 0;
+                orderSize = 0;
+              } else {
+                orderValue = Math.min(
+                  ADD_HIGH_CONFIDENCE_SIZE_USD,
+                  remainingAmount
+                );
+                orderSize = orderPrice > 0 ? orderValue / orderPrice : 0;
+
+                logToFile(
+                  "INFO",
+                  "High-confidence add trade detected (80-90%+)",
+                  {
+                    tradePrice: tradePrice * 100,
+                    confidenceLevel,
+                    addSize: ADD_HIGH_CONFIDENCE_SIZE_USD,
+                    currentPositionValue,
+                    maxBetAmount,
+                    remainingAmount,
+                    ourBetSize: orderValue,
+                    isHighConfidenceAdd: true,
+                  }
+                );
+              }
+            } else {
+              orderValue = AUTO_TRADE_AMOUNT_USD;
+
+              if (isOptimalConfidenceRange) {
+                orderValue = orderValue * optimalMultiplier;
+                confidenceLevel = isOptimalConfidenceRange
+                  ? "HIGH SIZE (OPTIMAL PRICE RANGE)"
+                  : "HIGH SIZE";
+              } else if (trackedTradeSize >= HIGH_CONFIDENCE_THRESHOLD_USD) {
+                confidenceLevel = "HIGH SIZE";
+              } else if (trackedTradeSize <= LOW_CONFIDENCE_THRESHOLD_USD) {
+                confidenceLevel = "LOW SIZE";
+              } else {
+                confidenceLevel = "MEDIUM SIZE";
+              }
+
+              orderValue = Math.min(orderValue, maxBetAmount);
+
+              if (USE_HALF_SIZE_INITIAL_TRADES) {
+                orderValue = orderValue / 2;
+                confidenceLevel += " (HALF-SIZE)";
+              }
+
               orderSize = orderPrice > 0 ? orderValue / orderPrice : 0;
-              logToFile("INFO", "Medium confidence trade detected", {
+              logToFile("INFO", "Initial trade detected (60-80%)", {
                 trackedTradeSize,
                 confidenceLevel,
                 isOptimalRange: isOptimalConfidenceRange,
                 optimalMultiplier,
-                scaleFactor,
                 ourBetSize: orderValue,
                 maxBetAmount,
+                autoTradeAmount: AUTO_TRADE_AMOUNT_USD,
+                halfSizeEnabled: USE_HALF_SIZE_INITIAL_TRADES,
               });
             }
           } else if (tradeSide === "SELL") {
@@ -629,6 +1029,81 @@ async function pollOnce(
               const originalOrderValue = orderValue;
               orderSize = orderPrice > 0 ? remainingAmount / orderPrice : 0;
               orderValue = orderSize * orderPrice;
+
+              if (orderValue < MIN_ORDER_VALUE_USD && orderPrice > 0) {
+                const minOrderValue = MIN_ORDER_VALUE_USD;
+                if (currentPositionValue + minOrderValue > maxBetAmount) {
+                  logToFile(
+                    "INFO",
+                    "Auto-trade skipped: Capped order below minimum and minimum would exceed max bet amount",
+                    {
+                      conditionId,
+                      tokenId,
+                      market: title || slug,
+                      currentPositionValue,
+                      maxBetAmount,
+                      cappedOrderValue: orderValue,
+                      minOrderValue,
+                      wouldExceed: currentPositionValue + minOrderValue,
+                    }
+                  );
+                  await activeChannel.send({
+                    embeds: [
+                      {
+                        title: "⏸️ Auto-trade Skipped",
+                        description: `Cannot place trade: minimum order size ($${minOrderValue}) would exceed max bet amount per position.`,
+                        color: 0xffaa00,
+                        fields: [
+                          {
+                            name: "Current Position",
+                            value: `$${currentPositionValue.toFixed(2)}`,
+                            inline: true,
+                          },
+                          {
+                            name: "Max Bet Amount",
+                            value: `$${maxBetAmount.toFixed(2)}`,
+                            inline: true,
+                          },
+                          {
+                            name: "Capped Trade",
+                            value: `$${orderValue.toFixed(
+                              2
+                            )} (below $${minOrderValue} minimum)`,
+                            inline: false,
+                          },
+                          {
+                            name: "Minimum Order",
+                            value: `$${minOrderValue.toFixed(
+                              2
+                            )} (would exceed limit)`,
+                            inline: false,
+                          },
+                        ],
+                        timestamp: new Date().toISOString(),
+                      },
+                    ],
+                  });
+                  continue;
+                } else {
+                  orderSize = MIN_ORDER_VALUE_USD / orderPrice;
+                  orderValue = MIN_ORDER_VALUE_USD;
+                  logToFile(
+                    "WARN",
+                    "Capped order below minimum, adjusted to minimum (within limit)",
+                    {
+                      conditionId,
+                      tokenId,
+                      market: title || slug,
+                      currentPositionValue,
+                      maxBetAmount,
+                      cappedOrderValue: orderSize * orderPrice,
+                      adjustedOrderValue: orderValue,
+                      minValue: MIN_ORDER_VALUE_USD,
+                    }
+                  );
+                }
+              }
+
               logToFile(
                 "INFO",
                 "Auto-trade size capped to avoid exceeding max bet amount per position",
@@ -683,46 +1158,297 @@ async function pollOnce(
             }
           }
 
-          if (orderValue < MIN_ORDER_VALUE_USD && orderPrice > 0) {
-            const originalOrderSize = orderSize;
-            orderSize = MIN_ORDER_VALUE_USD / orderPrice;
-            orderValue = MIN_ORDER_VALUE_USD;
-            logToFile("WARN", "Order value below minimum, increasing to $1", {
-              originalOrderSize,
-              originalOrderValue: originalOrderSize * orderPrice,
-              adjustedOrderSize: orderSize,
-              minValue: MIN_ORDER_VALUE_USD,
-              orderPrice,
-            });
-            await activeChannel.send({
-              embeds: [
-                {
-                  title: "⚠️ Order Value Adjusted",
-                  description: `Order value was below minimum of $${MIN_ORDER_VALUE_USD}.`,
-                  color: 0xffaa00,
-                  fields: [
+          if (
+            orderValue < MIN_ORDER_VALUE_USD &&
+            orderPrice > 0 &&
+            !isHighConfidenceAdd
+          ) {
+            if (
+              tradeSide === "BUY" &&
+              tokenId &&
+              MAX_BET_AMOUNT_PER_MARKET_USD > 0
+            ) {
+              let currentPositionValue = 0;
+              if (PAPER_TRADING_ENABLED) {
+                const paperPos = paperTradingState.positions[tokenId];
+                if (paperPos) {
+                  currentPositionValue = paperPos.entryValue || 0;
+                }
+              } else {
+                currentPositionValue = await getPositionValueForToken(tokenId);
+              }
+
+              const maxBetAmount =
+                MAX_BET_AMOUNT_PER_MARKET_USD > 0
+                  ? MAX_BET_AMOUNT_PER_MARKET_USD
+                  : MAX_ORDER_VALUE_USD;
+
+              const effectiveMinOrderValue = USE_HALF_SIZE_INITIAL_TRADES
+                ? MIN_ORDER_VALUE_USD / 2
+                : MIN_ORDER_VALUE_USD;
+
+              if (
+                currentPositionValue + effectiveMinOrderValue >
+                maxBetAmount
+              ) {
+                logToFile(
+                  "INFO",
+                  "Auto-trade skipped: Order below minimum and minimum would exceed max bet amount",
+                  {
+                    conditionId,
+                    tokenId,
+                    market: title || slug,
+                    currentPositionValue,
+                    maxBetAmount,
+                    orderValue,
+                    minOrderValue: effectiveMinOrderValue,
+                    wouldExceed: currentPositionValue + effectiveMinOrderValue,
+                  }
+                );
+                await activeChannel.send({
+                  embeds: [
                     {
-                      name: "Adjusted Order",
-                      value: `$${orderValue.toFixed(2)} (${orderSize.toFixed(
+                      title: "⏸️ Auto-trade Skipped",
+                      description: `Cannot place trade: minimum order size ($${effectiveMinOrderValue.toFixed(
                         2
-                      )} shares)`,
-                      inline: false,
+                      )}) would exceed max bet amount per position.`,
+                      color: 0xffaa00,
+                      fields: [
+                        {
+                          name: "Current Position",
+                          value: `$${currentPositionValue.toFixed(2)}`,
+                          inline: true,
+                        },
+                        {
+                          name: "Max Bet Amount",
+                          value: `$${maxBetAmount.toFixed(2)}`,
+                          inline: true,
+                        },
+                        {
+                          name: "Order Value",
+                          value: `$${orderValue.toFixed(
+                            2
+                          )} (below $${effectiveMinOrderValue.toFixed(
+                            2
+                          )} minimum)`,
+                          inline: false,
+                        },
+                        {
+                          name: "Minimum Order",
+                          value: `$${effectiveMinOrderValue.toFixed(
+                            2
+                          )} (would exceed limit)`,
+                          inline: false,
+                        },
+                      ],
+                      timestamp: new Date().toISOString(),
                     },
                   ],
-                  timestamp: new Date().toISOString(),
-                },
-              ],
-            });
+                });
+                continue;
+              } else {
+                if (orderValue < effectiveMinOrderValue) {
+                  const originalOrderSize = orderSize;
+                  const originalOrderValue = orderSize * orderPrice;
+                  orderSize = effectiveMinOrderValue / orderPrice;
+                  orderValue = effectiveMinOrderValue;
+                  logToFile(
+                    "WARN",
+                    "Order value below minimum, adjusted to minimum (within max bet limit)",
+                    {
+                      conditionId,
+                      tokenId,
+                      market: title || slug,
+                      currentPositionValue,
+                      maxBetAmount,
+                      originalOrderSize,
+                      originalOrderValue,
+                      adjustedOrderSize: orderSize,
+                      adjustedOrderValue: orderValue,
+                      minValue: effectiveMinOrderValue,
+                      standardMinValue: MIN_ORDER_VALUE_USD,
+                      halfSizeEnabled: USE_HALF_SIZE_INITIAL_TRADES,
+                      orderPrice,
+                    }
+                  );
+                  await activeChannel.send({
+                    embeds: [
+                      {
+                        title: "⚠️ Order Value Adjusted",
+                        description: `Order value was below minimum of $${effectiveMinOrderValue.toFixed(
+                          2
+                        )}${
+                          USE_HALF_SIZE_INITIAL_TRADES
+                            ? " (half-size minimum)"
+                            : ""
+                        }. Adjusted to minimum (within max bet limit).`,
+                        color: 0xffaa00,
+                        fields: [
+                          {
+                            name: "Original Order",
+                            value: `$${originalOrderValue.toFixed(2)}`,
+                            inline: true,
+                          },
+                          {
+                            name: "Adjusted Order",
+                            value: `$${orderValue.toFixed(
+                              2
+                            )} (${orderSize.toFixed(2)} shares)`,
+                            inline: true,
+                          },
+                          {
+                            name: "Position After Trade",
+                            value: `$${(
+                              currentPositionValue + orderValue
+                            ).toFixed(2)} / $${maxBetAmount.toFixed(2)}`,
+                            inline: true,
+                          },
+                        ],
+                        timestamp: new Date().toISOString(),
+                      },
+                    ],
+                  });
+                } else {
+                  logToFile("INFO", "Order value meets minimum requirement", {
+                    orderValue,
+                    effectiveMinOrderValue,
+                    halfSizeEnabled: USE_HALF_SIZE_INITIAL_TRADES,
+                  });
+                }
+              }
+            } else {
+              const originalOrderSize = orderSize;
+              orderSize = MIN_ORDER_VALUE_USD / orderPrice;
+              orderValue = MIN_ORDER_VALUE_USD;
+              logToFile("WARN", "Order value below minimum, increasing to $1", {
+                originalOrderSize,
+                originalOrderValue: originalOrderSize * orderPrice,
+                adjustedOrderSize: orderSize,
+                minValue: MIN_ORDER_VALUE_USD,
+                orderPrice,
+              });
+              await activeChannel.send({
+                embeds: [
+                  {
+                    title: "⚠️ Order Value Adjusted",
+                    description: `Order value was below minimum of $${MIN_ORDER_VALUE_USD}.`,
+                    color: 0xffaa00,
+                    fields: [
+                      {
+                        name: "Adjusted Order",
+                        value: `$${orderValue.toFixed(2)} (${orderSize.toFixed(
+                          2
+                        )} shares)`,
+                        inline: true,
+                      },
+                    ],
+                    timestamp: new Date().toISOString(),
+                  },
+                ],
+              });
+            }
           }
 
           orderSize = Math.round(orderSize * 100) / 100;
           orderValue = orderSize * orderPrice;
 
+          if (isHighConfidenceAdd && orderValue === 0) {
+            logToFile(
+              "INFO",
+              "High-confidence add skipped: No room for minimum order",
+              {
+                conditionId,
+                market: title || slug,
+                outcome,
+                tradePrice: tradePrice * 100,
+              }
+            );
+            continue;
+          }
+
           const proposedTradeValue = orderValue;
 
+          if (isHighConfidenceAdd && tokenId && tradeSide === "BUY") {
+            let currentPositionValue = 0;
+            if (PAPER_TRADING_ENABLED) {
+              const paperPos = paperTradingState.positions[tokenId];
+              if (paperPos) {
+                currentPositionValue = paperPos.entryValue || 0;
+              }
+            } else {
+              currentPositionValue = await getPositionValueForToken(tokenId);
+            }
+
+            const maxBetAmount =
+              MAX_BET_AMOUNT_PER_MARKET_USD > 0
+                ? MAX_BET_AMOUNT_PER_MARKET_USD
+                : MAX_ORDER_VALUE_USD;
+
+            const remainingAmount = Math.max(
+              0,
+              maxBetAmount - currentPositionValue
+            );
+
+            logToFile(
+              "INFO",
+              "High-confidence add position cap check (before order)",
+              {
+                tokenId: tokenId.substring(0, 20) + "...",
+                conditionId,
+                market: title || slug,
+                currentPositionValue,
+                maxBetAmount,
+                remainingAmount,
+                proposedTradeValue,
+                wouldExceed: proposedTradeValue > remainingAmount,
+                isHighConfidenceAdd: true,
+              }
+            );
+
+            if (proposedTradeValue > remainingAmount) {
+              if (remainingAmount < 1) {
+                logToFile(
+                  "WARN",
+                  "High-confidence add skipped: Insufficient room at order placement time",
+                  {
+                    tokenId,
+                    conditionId,
+                    market: title || slug,
+                    currentPositionValue,
+                    maxBetAmount,
+                    remainingAmount,
+                    proposedTradeValue,
+                    isHighConfidenceAdd: true,
+                  }
+                );
+                continue;
+              }
+
+              orderValue = remainingAmount;
+              orderSize = orderPrice > 0 ? orderValue / orderPrice : 0;
+
+              logToFile(
+                "WARN",
+                "High-confidence add adjusted: Position cap would be exceeded",
+                {
+                  tokenId,
+                  conditionId,
+                  market: title || slug,
+                  originalProposedValue: proposedTradeValue,
+                  adjustedOrderValue: orderValue,
+                  currentPositionValue,
+                  maxBetAmount,
+                  remainingAmount,
+                  isHighConfidenceAdd: true,
+                }
+              );
+            }
+          }
+
           const positionCheck = await checkPositionLimits(
-            proposedTradeValue,
-            tradeSide
+            orderValue,
+            tradeSide,
+            tokenId
           );
           if (!positionCheck.allowed) {
             logToFile("WARN", "Auto-trade skipped: Position limit reached", {
@@ -770,6 +1496,26 @@ async function pollOnce(
                   value: `$${positionCheck.newTotalExposure.toFixed(
                     2
                   )} > $${positionCheck.maxExposure.toFixed(2)}`,
+                  inline: false,
+                }
+              );
+            } else if (positionCheck.reason === "per_market_cap") {
+              limitEmbed.fields.push(
+                {
+                  name: "Current Position Value",
+                  value: `$${positionCheck.currentPositionValue.toFixed(2)}`,
+                  inline: true,
+                },
+                {
+                  name: "Proposed Trade",
+                  value: `$${proposedTradeValue.toFixed(2)}`,
+                  inline: true,
+                },
+                {
+                  name: "Would Exceed Limit",
+                  value: `$${positionCheck.newPositionValue.toFixed(
+                    2
+                  )} > $${positionCheck.maxBetAmount.toFixed(2)}`,
                   inline: false,
                 }
               );
@@ -874,18 +1620,35 @@ async function pollOnce(
                       usdcValue: orderValue,
                       timestamp: Date.now(),
                     });
+
+                    if (isHighConfidenceAdd) {
+                      markHighConfidenceAddPlaced(tokenId);
+                    } else {
+                      markInitialTradePlaced(tokenId);
+                    }
+
                     const buyEmbed = {
-                      title: isOptimalConfidenceRange
+                      title: isHighConfidenceAdd
+                        ? "✅ Paper Trade: MARKET BUY (HIGH CONFIDENCE ADD 80-90%+)"
+                        : isOptimalConfidenceRange
                         ? "✅ Paper Trade: MARKET BUY (OPTIMAL RANGE)"
                         : "✅ Paper Trade: MARKET BUY",
                       description: `$${orderValue.toFixed(
                         2
                       )} (${orderSize.toFixed(2)} shares) @ market price${
-                        isOptimalConfidenceRange
+                        isHighConfidenceAdd
+                          ? `\n\n🔥 **High-confidence add at ${(
+                              tradePrice * 100
+                            ).toFixed(0)}% - Adding to winning outcome!**`
+                          : isOptimalConfidenceRange
                           ? "\n\n🎯 **In optimal confidence range (60-70¢) - 85% win rate!**"
                           : ""
                       }`,
-                      color: isOptimalConfidenceRange ? 0x00ff00 : 0x00aa00,
+                      color: isHighConfidenceAdd
+                        ? 0xff6600
+                        : isOptimalConfidenceRange
+                        ? 0x00ff00
+                        : 0x00aa00,
                       fields: [
                         {
                           name: "Market",
@@ -910,7 +1673,11 @@ async function pollOnce(
                         {
                           name: "Entry Price",
                           value: `${(tradePrice * 100).toFixed(2)}¢${
-                            isOptimalConfidenceRange ? " 🎯" : ""
+                            isHighConfidenceAdd
+                              ? " 🔥"
+                              : isOptimalConfidenceRange
+                              ? " 🎯"
+                              : ""
                           }`,
                           inline: true,
                         },
@@ -1027,18 +1794,35 @@ async function pollOnce(
                     usdcValue: orderValue,
                     timestamp: Date.now(),
                   });
+
+                  if (isHighConfidenceAdd) {
+                    markHighConfidenceAddPlaced(tokenId);
+                  } else {
+                    markInitialTradePlaced(tokenId);
+                  }
+
                   const buyEmbed = {
-                    title: isOptimalConfidenceRange
+                    title: isHighConfidenceAdd
+                      ? "✅ Auto-placed MARKET BUY Order (HIGH CONFIDENCE ADD 80-90%+)"
+                      : isOptimalConfidenceRange
                       ? "✅ Auto-placed MARKET BUY Order (OPTIMAL RANGE)"
                       : "✅ Auto-placed MARKET BUY Order",
                     description: `$${orderValue.toFixed(
                       2
                     )} (${orderSize.toFixed(2)} shares) @ market price${
-                      isOptimalConfidenceRange
+                      isHighConfidenceAdd
+                        ? `\n\n🔥 **High-confidence add at ${(
+                            tradePrice * 100
+                          ).toFixed(0)}% - Adding to winning outcome!**`
+                        : isOptimalConfidenceRange
                         ? "\n\n🎯 **In optimal confidence range (60-70¢) - 85% win rate!**"
                         : ""
                     }`,
-                    color: isOptimalConfidenceRange ? 0x00ff00 : 0x00aa00,
+                    color: isHighConfidenceAdd
+                      ? 0xff6600
+                      : isOptimalConfidenceRange
+                      ? 0x00ff00
+                      : 0x00aa00,
                     fields: [
                       {
                         name: "Market",
@@ -1109,17 +1893,27 @@ async function pollOnce(
                     timestamp: Date.now(),
                   });
                   const buyEmbedNoStatus = {
-                    title: isOptimalConfidenceRange
+                    title: isHighConfidenceAdd
+                      ? "✅ Auto-placed MARKET BUY Order (HIGH CONFIDENCE ADD 80-90%+)"
+                      : isOptimalConfidenceRange
                       ? "✅ Auto-placed MARKET BUY Order (OPTIMAL RANGE)"
                       : "✅ Auto-placed MARKET BUY Order",
                     description: `$${orderValue.toFixed(
                       2
                     )} (${orderSize.toFixed(2)} shares) @ market price${
-                      isOptimalConfidenceRange
+                      isHighConfidenceAdd
+                        ? `\n\n🔥 **High-confidence add at ${(
+                            tradePrice * 100
+                          ).toFixed(0)}% - Adding to winning outcome!**`
+                        : isOptimalConfidenceRange
                         ? "\n\n🎯 **In optimal confidence range (60-70¢) - 85% win rate!**"
                         : ""
                     }`,
-                    color: isOptimalConfidenceRange ? 0x00ff00 : 0x00aa00,
+                    color: isHighConfidenceAdd
+                      ? 0xff6600
+                      : isOptimalConfidenceRange
+                      ? 0x00ff00
+                      : 0x00aa00,
                     fields: [
                       {
                         name: "Market",
@@ -1139,7 +1933,11 @@ async function pollOnce(
                       {
                         name: "Entry Price",
                         value: `${(tradePrice * 100).toFixed(2)}¢${
-                          isOptimalConfidenceRange ? " 🎯" : ""
+                          isHighConfidenceAdd
+                            ? " 🔥"
+                            : isOptimalConfidenceRange
+                            ? " 🎯"
+                            : ""
                         }`,
                         inline: true,
                       },
@@ -1709,6 +2507,18 @@ async function pollOnce(
                   clobClient,
                   clobClientReady
                 );
+
+                logToFile("INFO", "Buy order response received", {
+                  tokenId: tokenId.substring(0, 10) + "...",
+                  hasResponse: !!orderResponse,
+                  hasError: !!(orderResponse && orderResponse.error),
+                  hasSuccess: !!(
+                    orderResponse && orderResponse.success !== false
+                  ),
+                  hasOrderId: !!(orderResponse && orderResponse.orderId),
+                  orderId: orderResponse?.orderId,
+                });
+
                 if (orderResponse && orderResponse.error) {
                   const errorMsg = orderResponse.error;
                   if (
@@ -1802,6 +2612,167 @@ async function pollOnce(
                   await activeChannel.send({
                     embeds: [limitBuyEmbedWithStatus],
                   });
+
+                  if (STOP_LOSS_ENABLED && !PAPER_TRADING_ENABLED) {
+                    const matchesFilter =
+                      STOP_LOSS_WEBSOCKET_MARKET_FILTER.some((filter) => {
+                        if (filter.startsWith("0x") && conditionId) {
+                          return (
+                            conditionId.toLowerCase() === filter.toLowerCase()
+                          );
+                        }
+
+                        const keyword = filter.toLowerCase();
+                        return (
+                          (title && title.toLowerCase().includes(keyword)) ||
+                          (slug && slug.toLowerCase().includes(keyword))
+                        );
+                      });
+
+                    if (matchesFilter) {
+                      try {
+                        const stopLossPrice =
+                          orderPrice * (1 - STOP_LOSS_PERCENTAGE / 100);
+
+                        if (orderbookWS && conditionId) {
+                          const {
+                            getAllStopLossPositions,
+                            deleteStopLossPosition,
+                          } = require("./positions");
+                          const allPositions = getAllStopLossPositions();
+                          const marketTypeMatch = (title || slug || "").match(
+                            /^([^-]+)/
+                          );
+                          const marketType = marketTypeMatch
+                            ? marketTypeMatch[1].trim()
+                            : null;
+
+                          if (marketType) {
+                            for (const [
+                              oldTokenId,
+                              oldPosition,
+                            ] of allPositions.entries()) {
+                              if (
+                                oldPosition.conditionId &&
+                                oldPosition.conditionId !== conditionId &&
+                                oldPosition.market &&
+                                oldPosition.market.includes(marketType)
+                              ) {
+                                logToFile(
+                                  "INFO",
+                                  "Cleaning up old hourly event subscription - new event started",
+                                  {
+                                    oldTokenId:
+                                      oldTokenId.substring(0, 10) + "...",
+                                    oldConditionId:
+                                      oldPosition.conditionId.substring(0, 10) +
+                                      "...",
+                                    newConditionId:
+                                      conditionId.substring(0, 10) + "...",
+                                    marketType,
+                                  }
+                                );
+                                orderbookWS.unsubscribe(oldTokenId);
+                                deleteStopLossPosition(oldTokenId);
+                              }
+                            }
+                          }
+                        }
+
+                        setStopLossPosition(
+                          tokenId,
+                          orderPrice,
+                          orderSize,
+                          stopLossPrice,
+                          {
+                            market: title || slug || "Unknown",
+                            conditionId: conditionId || null,
+                            outcome: outcome || null,
+                          }
+                        );
+
+                        if (orderbookWS) {
+                          orderbookWS.subscribe(tokenId);
+                        }
+
+                        logToFile(
+                          "INFO",
+                          "Position registered for WebSocket stop-loss monitoring",
+                          {
+                            tokenId: tokenId.substring(0, 10) + "...",
+                            market: title || slug,
+                            entryPrice: orderPrice,
+                            shares: orderSize,
+                            stopLossPrice,
+                            filter:
+                              STOP_LOSS_WEBSOCKET_MARKET_FILTER.join(", "),
+                          }
+                        );
+
+                        await activeChannel.send({
+                          embeds: [
+                            {
+                              title: "🛑 Stop-Loss Monitoring Active",
+                              description: `Position will be sold via market order when price drops to stop-loss (${STOP_LOSS_PERCENTAGE}% below entry)`,
+                              color: 0xff6600,
+                              fields: [
+                                {
+                                  name: "Market",
+                                  value: title || slug || "Unknown",
+                                  inline: false,
+                                },
+                                {
+                                  name: "Entry Price",
+                                  value: `$${orderPrice.toFixed(4)} (${(
+                                    orderPrice * 100
+                                  ).toFixed(2)}¢)`,
+                                  inline: true,
+                                },
+                                {
+                                  name: "Stop-Loss Price",
+                                  value: `$${stopLossPrice.toFixed(4)} (${(
+                                    stopLossPrice * 100
+                                  ).toFixed(2)}¢)`,
+                                  inline: true,
+                                },
+                                {
+                                  name: "Shares",
+                                  value: `${orderSize.toFixed(2)}`,
+                                  inline: true,
+                                },
+                                {
+                                  name: "Method",
+                                  value: "WebSocket + Market Order",
+                                  inline: true,
+                                },
+                              ],
+                              timestamp: new Date().toISOString(),
+                            },
+                          ],
+                        });
+                      } catch (stopLossError) {
+                        logToFile(
+                          "ERROR",
+                          "Error registering position for stop-loss monitoring",
+                          {
+                            tokenId: tokenId.substring(0, 10) + "...",
+                            error: stopLossError.message,
+                            stack: stopLossError.stack,
+                          }
+                        );
+                      }
+                    } else {
+                      logToFile(
+                        "INFO",
+                        "Skipping WebSocket stop-loss registration - market does not match filter",
+                        {
+                          tokenId: tokenId.substring(0, 10) + "...",
+                          market: title || slug || "Unknown",
+                          filter: STOP_LOSS_WEBSOCKET_MARKET_FILTER.join(", "),
+                        }
+                      );
+                    }
+                  }
                 } else {
                   setTrackedPosition(tokenId, {
                     usdcValue: orderValue,
@@ -2201,6 +3172,69 @@ async function runPollLoop(
 ) {
   await pollOnce(clobClient, clobClientReady, orderbookWS, trackedPositions);
 
+  if (orderbookWS && !PAPER_TRADING_ENABLED) {
+    try {
+      const {
+        getAllStopLossPositions,
+        deleteStopLossPosition,
+      } = require("./positions");
+      const stopLossPositions = getAllStopLossPositions();
+
+      if (stopLossPositions && stopLossPositions.size > 0) {
+        const positionsToCheck = Array.from(stopLossPositions.entries());
+        for (const [tokenId, position] of positionsToCheck) {
+          if (!position.conditionId) continue;
+
+          try {
+            const marketUrl = `https://data-api.polymarket.com/markets?conditionId=${position.conditionId}`;
+            const marketResponse = await fetch(marketUrl, {
+              headers: {
+                Accept: "application/json",
+                "User-Agent":
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+              },
+            });
+
+            if (marketResponse.ok) {
+              const markets = await marketResponse.json();
+              if (Array.isArray(markets) && markets.length > 0) {
+                const market = markets[0];
+                const isResolved =
+                  market.resolved ||
+                  market.status === "Resolved" ||
+                  market.status === "Closed";
+
+                if (isResolved) {
+                  logToFile(
+                    "INFO",
+                    "Market resolved - cleaning up WebSocket subscription",
+                    {
+                      tokenId: tokenId.substring(0, 10) + "...",
+                      conditionId:
+                        position.conditionId.substring(0, 10) + "...",
+                      market: position.market,
+                    }
+                  );
+                  orderbookWS.unsubscribe(tokenId);
+                  deleteStopLossPosition(tokenId);
+                }
+              }
+            }
+          } catch (error) {
+            logToFile("WARN", "Error checking market resolution for cleanup", {
+              tokenId: tokenId.substring(0, 10) + "...",
+              error: error.message,
+            });
+          }
+        }
+      }
+    } catch (error) {
+      logToFile("ERROR", "Failed to clean up WebSocket subscriptions", {
+        error: error.message,
+      });
+    }
+  }
+
   if (PAPER_TRADING_ENABLED && isPolling) {
     try {
       await checkAndSettleResolvedMarkets(
@@ -2317,6 +3351,90 @@ async function startPolling(
       POLL_INTERVAL_MS / 1000
     }s.`
   );
+
+  if (MAX_BET_AMOUNT_PER_MARKET_USD > 0 && clobClientReady) {
+    try {
+      const positions = await getCurrentPositions();
+      const positionsByToken = new Map();
+
+      for (const pos of positions) {
+        const tokenId = pos.token_id || pos.conditionId || pos.tokenID;
+        if (tokenId) {
+          const value =
+            pos.usdc_value || pos.usdcValue || pos.value || pos.cost || 0;
+          if (positionsByToken.has(tokenId)) {
+            positionsByToken.set(
+              tokenId,
+              positionsByToken.get(tokenId) +
+                (typeof value === "number" ? value : 0)
+            );
+          } else {
+            positionsByToken.set(
+              tokenId,
+              typeof value === "number" ? value : 0
+            );
+          }
+        }
+      }
+
+      const cappedPositions = [];
+      for (const [tokenId, totalValue] of positionsByToken.entries()) {
+        if (totalValue >= MAX_BET_AMOUNT_PER_MARKET_USD) {
+          cappedPositions.push({ tokenId, totalValue });
+        }
+      }
+
+      if (cappedPositions.length > 0) {
+        logToFile(
+          "WARN",
+          "Existing positions at or above max bet amount on startup",
+          {
+            count: cappedPositions.length,
+            maxBetAmount: MAX_BET_AMOUNT_PER_MARKET_USD,
+            positions: cappedPositions.map((p) => ({
+              tokenId: p.tokenId.substring(0, 10) + "...",
+              value: p.totalValue,
+            })),
+          }
+        );
+        await channel.send({
+          embeds: [
+            {
+              title: "⚠️ Position Cap Check (Startup)",
+              description: `Found ${cappedPositions.length} position(s) already at or above max bet amount ($${MAX_BET_AMOUNT_PER_MARKET_USD}). These markets will be skipped for new trades.`,
+              color: 0xffaa00,
+              fields: cappedPositions.slice(0, 10).map((p) => ({
+                name: "Position",
+                value: `$${p.totalValue.toFixed(
+                  2
+                )} / $${MAX_BET_AMOUNT_PER_MARKET_USD.toFixed(2)}`,
+                inline: true,
+              })),
+              footer:
+                cappedPositions.length > 10
+                  ? { text: `...and ${cappedPositions.length - 10} more` }
+                  : undefined,
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        });
+      } else {
+        logToFile(
+          "INFO",
+          "Startup position cap check: All positions below max bet amount",
+          {
+            totalPositions: positionsByToken.size,
+            maxBetAmount: MAX_BET_AMOUNT_PER_MARKET_USD,
+          }
+        );
+      }
+    } catch (error) {
+      logToFile("ERROR", "Failed to check positions on startup", {
+        error: error.message,
+        stack: error.stack,
+      });
+    }
+  }
 
   await pollOnce(clobClient, clobClientReady, orderbookWS, trackedPositions);
   scheduleNextPoll(

@@ -171,6 +171,17 @@ async function getTokenIdForOutcome(conditionId, outcome) {
   return null;
 }
 
+async function getOppositeOutcomeTokenId(conditionId, currentOutcome) {
+  const oppositeOutcome =
+    currentOutcome === "Up" ? "Down" : currentOutcome === "Down" ? "Up" : null;
+
+  if (!oppositeOutcome) {
+    return null;
+  }
+
+  return await getTokenIdForOutcome(conditionId, oppositeOutcome);
+}
+
 async function getCurrentMarketPrice(
   tokenId,
   orderbookWS,
@@ -181,23 +192,19 @@ async function getCurrentMarketPrice(
     let orderBook = null;
     let orderBookSource = "none";
 
-    if (orderbookWS && orderbookWS.isConnected) {
+    if (orderbookWS) {
       orderbookWS.subscribe(tokenId);
-
-      const lastTrade = orderbookWS.getLastTradePrice(tokenId);
-      if (lastTrade && Date.now() - lastTrade.timestamp < 30000) {
-        logToFile("INFO", "Using last trade price from WebSocket (immediate)", {
-          tokenId: tokenId.substring(0, 10) + "...",
-          fullTokenId: tokenId,
-          price: lastTrade.price,
-          age: Date.now() - lastTrade.timestamp,
-        });
-        return {
-          price: lastTrade.price,
-          bestBidSize: lastTrade.size || 0,
-          source: "websocket_last_trade",
-          isLastTrade: true,
-        };
+      if (orderbookWS.isConnected) {
+        const lastTrade = orderbookWS.getLastTradePrice(tokenId);
+        if (lastTrade && Date.now() - lastTrade.timestamp < 30000) {
+          return {
+            price: lastTrade.price,
+            bestBidSize: lastTrade.size || 0,
+            side: lastTrade.side,
+            source: "websocket_last_trade",
+            isLastTrade: true,
+          };
+        }
       }
 
       const wsOrderbook = orderbookWS.getOrderbook(tokenId);
@@ -222,20 +229,10 @@ async function getCurrentMarketPrice(
 
           const lastTradeCheck = orderbookWS.getLastTradePrice(tokenId);
           if (lastTradeCheck && Date.now() - lastTradeCheck.timestamp < 30000) {
-            logToFile(
-              "INFO",
-              "Using last trade price from WebSocket (after wait)",
-              {
-                tokenId: tokenId.substring(0, 10) + "...",
-                fullTokenId: tokenId,
-                price: lastTradeCheck.price,
-                waitTime: waited,
-                age: Date.now() - lastTradeCheck.timestamp,
-              }
-            );
             return {
               price: lastTradeCheck.price,
               bestBidSize: lastTradeCheck.size || 0,
+              side: lastTradeCheck.side,
               source: "websocket_last_trade",
               isLastTrade: true,
             };
@@ -306,18 +303,10 @@ async function getCurrentMarketPrice(
     if (orderbookWS && orderbookWS.isConnected) {
       const lastTrade = orderbookWS.getLastTradePrice(tokenId);
       if (lastTrade && Date.now() - lastTrade.timestamp < 30000) {
-        logToFile("INFO", "Using last trade price from WebSocket", {
-          tokenId: tokenId.substring(0, 10) + "...",
-          fullTokenId: tokenId,
-          price: lastTrade.price,
-          side: lastTrade.side,
-          size: lastTrade.size,
-          age: Date.now() - lastTrade.timestamp,
-          source: "websocket_last_trade",
-        });
         return {
           price: lastTrade.price,
           bestBidSize: lastTrade.size || 0,
+          side: lastTrade.side,
           source: "websocket_last_trade",
           isLastTrade: true,
         };
@@ -471,6 +460,7 @@ async function getTrackedWalletPosition(tokenId, walletAddress, price) {
 module.exports = {
   fetchLatestActivity,
   getTokenIdForOutcome,
+  getOppositeOutcomeTokenId,
   getCurrentMarketPrice,
   getTrackedWalletPosition,
 };

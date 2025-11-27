@@ -1,8 +1,10 @@
 const WebSocket = require("ws");
+const { EventEmitter } = require("events");
 const { logToFile } = require("../utils/logger");
 
-class OrderbookWebSocketManager {
+class OrderbookWebSocketManager extends EventEmitter {
   constructor(apiKey, apiSecret, apiPassphrase) {
+    super();
     this.apiKey = apiKey;
     this.apiSecret = apiSecret;
     this.apiPassphrase = apiPassphrase;
@@ -14,6 +16,7 @@ class OrderbookWebSocketManager {
     this.maxReconnectAttempts = 5;
     this.pingInterval = null;
     this.isConnected = false;
+    this.stopLossCallback = null;
   }
 
   connect() {
@@ -25,8 +28,16 @@ class OrderbookWebSocketManager {
     this.ws = new WebSocket(url);
 
     this.ws.on("open", () => {
+      const wasReconnecting = this.reconnectAttempts > 0;
       this.isConnected = true;
       this.reconnectAttempts = 0;
+      if (!wasReconnecting) {
+        logToFile("INFO", "WebSocket connected successfully", {
+          url: url,
+          subscribedAssets: this.subscribedAssets.size,
+        });
+      }
+      this.emit("connected");
 
       this.pingInterval = setInterval(() => {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -40,7 +51,7 @@ class OrderbookWebSocketManager {
 
       setTimeout(() => {
         this.resubscribeAll();
-      }, 500);
+      }, 1000);
     });
 
     this.ws.on("message", (data) => {
@@ -74,12 +85,25 @@ class OrderbookWebSocketManager {
               size: parseFloat(parsed.size || 0),
               timestamp: parseInt(parsed.timestamp || Date.now()),
             });
-            logToFile("INFO", "Last trade price updated from WebSocket", {
-              assetId: parsed.asset_id.substring(0, 10) + "...",
-              price,
-              side: parsed.side,
-              size: parsed.size,
-            });
+
+            if (
+              this.stopLossCallback &&
+              typeof this.stopLossCallback === "function"
+            ) {
+              try {
+                this.stopLossCallback(
+                  parsed.asset_id,
+                  price,
+                  parsed.side || "UNKNOWN"
+                );
+              } catch (error) {
+                logToFile("ERROR", "Error in stop-loss callback", {
+                  assetId: parsed.asset_id.substring(0, 10) + "...",
+                  error: error.message,
+                  stack: error.stack,
+                });
+              }
+            }
           }
         } else if (
           parsed.event_type === "price_change" &&
@@ -112,21 +136,27 @@ class OrderbookWebSocketManager {
     });
 
     this.ws.on("error", (error) => {
-      logToFile("WARN", "WebSocket error", { error: error.message });
+      logToFile("WARN", "WebSocket error", {
+        error: error.message,
+        stack: error.stack,
+        url: url,
+      });
     });
 
     this.ws.on("close", (code, reason) => {
-      if (code !== 1006) {
-        logToFile("WARN", "WebSocket closed unexpectedly", {
-          code,
-          reason: reason?.toString(),
-          reconnectAttempts: this.reconnectAttempts,
-        });
-      }
       this.isConnected = false;
       if (this.pingInterval) {
         clearInterval(this.pingInterval);
         this.pingInterval = null;
+      }
+
+      if (code !== 1006 && code !== 1000) {
+        logToFile("WARN", "WebSocket closed unexpectedly", {
+          code,
+          reason: reason?.toString(),
+          reconnectAttempts: this.reconnectAttempts,
+          subscribedAssets: this.subscribedAssets.size,
+        });
       }
 
       if (this.reconnectAttempts < this.maxReconnectAttempts) {
@@ -135,10 +165,18 @@ class OrderbookWebSocketManager {
           1000 * Math.pow(2, this.reconnectAttempts),
           30000
         );
+        if (this.reconnectAttempts > 2) {
+          logToFile("INFO", "Attempting WebSocket reconnection", {
+            attempt: this.reconnectAttempts,
+            maxAttempts: this.maxReconnectAttempts,
+            delayMs: delay,
+          });
+        }
         setTimeout(() => this.connect(), delay);
       } else {
         logToFile("ERROR", "WebSocket max reconnection attempts reached", {
           maxAttempts: this.maxReconnectAttempts,
+          subscribedAssets: this.subscribedAssets.size,
         });
       }
     });
@@ -158,9 +196,13 @@ class OrderbookWebSocketManager {
           type: "market",
         };
         this.ws.send(JSON.stringify(subscribeMessage));
+        logToFile("INFO", "Subscribed to asset on WebSocket", {
+          assetId: assetId.substring(0, 10) + "...",
+          totalSubscribed: this.subscribedAssets.size,
+        });
       } catch (error) {
         logToFile("WARN", "Failed to send subscription message", {
-          assetId,
+          assetId: assetId.substring(0, 10) + "...",
           error: error.message,
         });
       }
@@ -178,6 +220,11 @@ class OrderbookWebSocketManager {
         type: "market",
       };
       this.ws.send(JSON.stringify(subscribeMessage));
+      if (this.subscribedAssets.size > 0) {
+        logToFile("INFO", "Resubscribed to all assets on WebSocket", {
+          assetCount: this.subscribedAssets.size,
+        });
+      }
     }
   }
 
@@ -187,6 +234,42 @@ class OrderbookWebSocketManager {
 
   getLastTradePrice(assetId) {
     return this.lastTradePrices.get(assetId) || null;
+  }
+
+  unsubscribe(assetId) {
+    if (!this.subscribedAssets.has(assetId)) {
+      return;
+    }
+
+    this.subscribedAssets.delete(assetId);
+
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        const unsubscribeMessage = {
+          assets_ids: [assetId],
+          type: "market",
+          unsubscribe: true,
+        };
+        this.ws.send(JSON.stringify(unsubscribeMessage));
+        logToFile("INFO", "Unsubscribed from asset on WebSocket", {
+          assetId: assetId.substring(0, 10) + "...",
+          totalSubscribed: this.subscribedAssets.size,
+        });
+      } catch (error) {
+        logToFile("WARN", "Failed to send unsubscribe message", {
+          assetId: assetId.substring(0, 10) + "...",
+          error: error.message,
+        });
+      }
+    }
+  }
+
+  getSubscribedAssets() {
+    return Array.from(this.subscribedAssets);
+  }
+
+  setStopLossCallback(callback) {
+    this.stopLossCallback = callback;
   }
 
   disconnect() {

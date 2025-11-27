@@ -124,6 +124,9 @@ async function paperBuy(
     if (!pos.outcome && outcome) {
       pos.outcome = outcome;
     }
+    if (!pos.entryTimestamp) {
+      pos.entryTimestamp = Date.now();
+    }
     pos.lastChecked = Date.now();
   } else {
     paperTradingState.positions[tokenId] = {
@@ -135,7 +138,12 @@ async function paperBuy(
       endDate: endDate || null,
       outcome: outcome || null,
       lastChecked: Date.now(),
+      entryTimestamp: Date.now(),
     };
+  }
+
+  if (pos && !pos.entryTimestamp) {
+    pos.entryTimestamp = Date.now();
   }
 
   paperTradingState.tradeHistory.push({
