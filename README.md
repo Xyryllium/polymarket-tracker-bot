@@ -20,16 +20,13 @@ Discord bot that tracks Polymarket wallet activity and can automatically copy tr
    npm install
    ```
 
-2. **Create `.env` file** (see `env.example` for full list):
+2. **Create `.env` file** by copying `env.example`:
 
    ```bash
-   DISCORD_TOKEN=your-bot-token
-   POLL_INTERVAL_MS=15000
-   AUTO_TRADE_ENABLED=false
-   COPY_TRADE_ENABLED=true
-   AUTO_TRADE_FILTER=BTC,ETH
-   AUTO_TRADE_AMOUNT_USD=1
+   cp env.example .env
    ```
+
+   Then edit `.env` and fill in your configuration values (see `env.example` for full list of options).
 
 3. **Start the bot**:
 
