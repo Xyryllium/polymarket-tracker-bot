@@ -132,6 +132,16 @@ Discord bot that tracks Polymarket wallet activity and can automatically copy tr
 - Monitor API response codes and implement retry logic with exponential backoff
 - For production deployments, consider using a residential proxy or rotating IP addresses
 
+### Dynamic Sizing
+
+⚠️ **Dynamic sizing may still be faulty and is currently for testing:**
+
+- Bet size adjustments based on tracked wallet trade size may not work correctly
+- Confidence-based sizing multipliers may not be applied as expected
+- Use with caution and verify bet sizes before enabling in production
+
+**Recommendation**: Test dynamic sizing thoroughly in paper trading mode before using with real funds.
+
 ### Other Issues
 
 - Limit orders in auto-trading are not fully implemented (only market orders work)
