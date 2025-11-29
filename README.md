@@ -115,19 +115,20 @@ Discord bot that tracks Polymarket wallet activity and can automatically copy tr
 
 ### Cloudflare Blocking (Cloud Deployment)
 
-⚠️ **When deployed to cloud services, Cloudflare may block API requests:**
+⚠️ **Some cloud hosting providers may experience Cloudflare blocking:**
 
-- Cloud hosting providers (AWS, Heroku, Railway, etc.) may have IP addresses that are flagged by Cloudflare
+- Certain cloud providers (Heroku, Railway, some AWS regions, etc.) may have IP addresses that are flagged by Cloudflare
 - API requests to Polymarket endpoints may be blocked or rate-limited
 - This can cause the bot to fail to fetch market data or place orders
 
+**Note**: **AWS EC2 Europe region** has been tested and works without Cloudflare blocking issues.
+
 **Recommendation**:
 
+- **AWS EC2 Europe(Ireland) region** is recommended for cloud deployment (tested and working)
 - **Use the bot on a local machine** to avoid Cloudflare blocking issues entirely
-- Consider using a proxy service or VPN for API requests if cloud deployment is necessary
-- Use a dedicated server with a static IP address
+- Consider using a proxy service or VPN for API requests if using other cloud providers
 - Monitor API response codes and implement retry logic with exponential backoff
-- For production deployments, consider using a residential proxy or rotating IP addresses
 
 ### Dynamic Sizing
 

@@ -63,8 +63,10 @@ if (!DISCORD_TOKEN) {
   throw new Error("Missing DISCORD_TOKEN in environment variables.");
 }
 
-if (!Number.isFinite(POLL_INTERVAL_MS) || POLL_INTERVAL_MS < 5000) {
-  throw new Error("POLL_INTERVAL_MS must be a number >= 5000.");
+if (!Number.isFinite(POLL_INTERVAL_MS) || POLL_INTERVAL_MS < 500) {
+  throw new Error(
+    "POLL_INTERVAL_MS must be a number >= 500 (500ms minimum for rate limit safety)."
+  );
 }
 
 let clobClient = null;
