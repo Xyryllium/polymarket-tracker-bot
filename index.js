@@ -538,7 +538,7 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
-client.once("ready", async () => {
+client.once("clientReady", async () => {
   logToFile("INFO", "Discord bot ready", { botTag: client.user.tag });
   console.log(`Logged in as ${client.user.tag}`);
   console.log(
