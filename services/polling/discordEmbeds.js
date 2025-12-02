@@ -85,7 +85,7 @@ function createTradeEmbed(trade) {
 
 function createAutoTradeSkippedEmbed(title, description, fields = []) {
   return {
-    title: "⏸️ Auto-trade Skipped",
+    title,
     description,
     color: 0xffaa00,
     fields,
