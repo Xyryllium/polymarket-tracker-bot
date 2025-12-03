@@ -5,6 +5,7 @@ const {
   CLOUDFLARE_RETRY_DELAY_MS,
   MAX_ORDER_VALUE_USD,
   POLYMARKET_FUNDER,
+  CLOB_EXCHANGE_ADDRESS,
 } = require("../config");
 const { logToFile } = require("../utils/logger");
 const { isCloudflareBlock } = require("../utils/helpers");
@@ -244,55 +245,174 @@ async function placeSellOrder(
   }
 
   try {
-    incrementOrderNonce();
-    const order = await clobClient.createOrder({
-      tokenID: tokenId,
-      price: price,
-      side: Side.SELL,
-      size: size,
-      feeRateBps: 0,
-      nonce: orderNonce,
-    });
-
     let response;
-    try {
-      response = await clobClient.postOrder(order, orderType);
-    } catch (postError) {
-      if (
-        postError &&
-        postError.message &&
-        isCloudflareBlock(postError.message)
-      ) {
-        const errorMsg =
-          "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
-        logToFile("ERROR", "Cloudflare block detected (from error)", {
-          tokenId,
-          price,
-          size,
-          errorMessage: postError.message.substring(0, 200),
+    let lastError = null;
+    let order = null;
+
+    for (let attempt = 1; attempt <= MAX_CLOUDFLARE_RETRIES; attempt++) {
+      try {
+        if (attempt > 1) {
+          const delay = CLOUDFLARE_RETRY_DELAY_MS * attempt;
+          logToFile(
+            "INFO",
+            `Retrying sell order (attempt ${attempt}/${MAX_CLOUDFLARE_RETRIES})`,
+            {
+              delayMs: delay,
+              tokenId: tokenId.substring(0, 10) + "...",
+            }
+          );
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+
+        order = await clobClient.createOrder({
+          tokenID: tokenId,
+          price: price,
+          side: Side.SELL,
+          size: size,
+          feeRateBps: 0,
+          nonce: 0,
         });
-        throw new Error(errorMsg);
+
+        try {
+          response = await clobClient.postOrder(order, orderType);
+        } catch (postError) {
+          if (
+            postError &&
+            postError.message &&
+            isCloudflareBlock(postError.message)
+          ) {
+            const errorMsg =
+              "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
+            logToFile("ERROR", "Cloudflare block detected (from error)", {
+              tokenId,
+              price,
+              size,
+              errorMessage: postError.message.substring(0, 200),
+            });
+            throw new Error(errorMsg);
+          }
+          throw postError;
+        }
+
+        if (isCloudflareBlock(response)) {
+          const errorMsg =
+            "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
+          logToFile("ERROR", "Cloudflare block detected (from response)", {
+            tokenId,
+            price,
+            size,
+            responseType: typeof response,
+            responsePreview:
+              typeof response === "string"
+                ? response.substring(0, 200)
+                : JSON.stringify(response).substring(0, 200),
+          });
+          throw new Error(errorMsg);
+        }
+
+        if (
+          response &&
+          response.error &&
+          response.error.includes("invalid nonce")
+        ) {
+          logToFile(
+            "WARN",
+            `Invalid nonce in response, will retry (attempt ${attempt}/${MAX_CLOUDFLARE_RETRIES})`,
+            {
+              tokenId: tokenId.substring(0, 10) + "...",
+              attempt,
+            }
+          );
+          if (attempt < MAX_CLOUDFLARE_RETRIES) {
+            order = await clobClient.createOrder({
+              tokenID: tokenId,
+              price: price,
+              side: Side.SELL,
+              size: size,
+              feeRateBps: 0,
+              nonce: 0,
+            });
+            continue;
+          } else {
+            throw new Error(
+              `Invalid nonce after ${MAX_CLOUDFLARE_RETRIES} attempts. The API may be rejecting all nonces. Please check your API credentials or contact Polymarket support.`
+            );
+          }
+        }
+
+        return response;
+      } catch (error) {
+        lastError = error;
+        const errorMsg = error.message || String(error);
+        const responseError =
+          error.response?.data?.error || error.response?.data?.message || "";
+
+        if (
+          responseError.includes("invalid nonce") ||
+          errorMsg.includes("invalid nonce")
+        ) {
+          logToFile(
+            "WARN",
+            `Invalid nonce detected, retrying (attempt ${attempt})`,
+            {
+              tokenId: tokenId.substring(0, 10) + "...",
+              attempt,
+            }
+          );
+          if (attempt < MAX_CLOUDFLARE_RETRIES) {
+            order = await clobClient.createOrder({
+              tokenID: tokenId,
+              price: price,
+              side: Side.SELL,
+              size: size,
+              feeRateBps: 0,
+              nonce: 0,
+            });
+            continue;
+          } else {
+            throw new Error(
+              `Invalid nonce after ${MAX_CLOUDFLARE_RETRIES} attempts. Please restart the bot.`
+            );
+          }
+        }
+
+        if (error.message && error.message.includes("Cloudflare")) {
+          throw error;
+        }
+        if (error.message && isCloudflareBlock(error.message)) {
+          const errorMsg =
+            "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
+          logToFile("ERROR", "Cloudflare block detected (from catch)", {
+            tokenId,
+            price,
+            size,
+            errorMessage: error.message.substring(0, 200),
+          });
+          throw new Error(errorMsg);
+        }
+
+        if (attempt < MAX_CLOUDFLARE_RETRIES) {
+          continue;
+        }
+
+        throw error;
       }
-      throw postError;
     }
 
-    if (isCloudflareBlock(response)) {
-      const errorMsg =
-        "Cloudflare is blocking requests. Your server IP may be flagged. Please try again later or contact Polymarket support.";
-      logToFile("ERROR", "Cloudflare block detected (from response)", {
-        tokenId,
-        price,
-        size,
-        responseType: typeof response,
-        responsePreview:
-          typeof response === "string"
-            ? response.substring(0, 200)
-            : JSON.stringify(response).substring(0, 200),
-      });
-      throw new Error(errorMsg);
+    if (lastError) {
+      if (
+        lastError.message &&
+        (lastError.message.includes("invalid nonce") ||
+          String(lastError).includes("invalid nonce"))
+      ) {
+        throw new Error(
+          `Invalid nonce after ${MAX_CLOUDFLARE_RETRIES} attempts. The API may be rejecting all nonces. Please check your API credentials or contact Polymarket support.`
+        );
+      }
+      throw lastError;
     }
 
-    return response;
+    throw new Error("Failed to place sell order after all retries");
   } catch (error) {
     if (error.message && error.message.includes("Cloudflare")) {
       throw error;
@@ -770,12 +890,21 @@ async function placeMarketSellOrder(
 
     if (provider && signer) {
       try {
+        let walletAddress = POLYMARKET_FUNDER;
+        if (!walletAddress) {
+          walletAddress = signer.address || (await signer.getAddress());
+        }
+
         const tokenContract = new Contract(
           tokenId,
-          ["function balanceOf(address owner) view returns (uint256)"],
-          provider
+          [
+            "function balanceOf(address owner) view returns (uint256)",
+            "function allowance(address owner, address spender) view returns (uint256)",
+            "function approve(address spender, uint256 amount) returns (bool)",
+          ],
+          signer
         );
-        const walletAddress = POLYMARKET_FUNDER || signer.address;
+
         const tokenBalance = await tokenContract.balanceOf(walletAddress);
         const tokenBalanceFormatted = parseFloat(
           (Number(tokenBalance) / 1e18).toFixed(4)
@@ -796,6 +925,57 @@ async function placeMarketSellOrder(
             `Insufficient token balance: You have ${tokenBalanceFormatted} tokens, but need ${orderSize} to sell. You must own the tokens before you can sell them.`
           );
         }
+
+        if (CLOB_EXCHANGE_ADDRESS) {
+          const currentAllowance = await tokenContract.allowance(
+            walletAddress,
+            CLOB_EXCHANGE_ADDRESS
+          );
+          const allowanceFormatted = parseFloat(
+            (Number(currentAllowance) / 1e18).toFixed(4)
+          );
+          const orderSizeWei = BigInt(Math.floor(orderSize * 1e18));
+
+          if (currentAllowance < orderSizeWei) {
+            logToFile(
+              "INFO",
+              "Setting allowance for conditional token to Exchange",
+              {
+                tokenId: tokenId.substring(0, 10) + "...",
+                currentAllowance: allowanceFormatted,
+                requiredAmount: orderSize,
+                exchangeAddress: CLOB_EXCHANGE_ADDRESS,
+              }
+            );
+
+            const maxAllowance = BigInt(
+              "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            );
+            const approveTx = await tokenContract.approve(
+              CLOB_EXCHANGE_ADDRESS,
+              maxAllowance
+            );
+            logToFile(
+              "INFO",
+              "Approval transaction sent, waiting for confirmation",
+              {
+                tokenId: tokenId.substring(0, 10) + "...",
+                txHash: approveTx.hash,
+              }
+            );
+            await approveTx.wait();
+            logToFile("INFO", "Allowance approved successfully", {
+              tokenId: tokenId.substring(0, 10) + "...",
+              txHash: approveTx.hash,
+            });
+          } else {
+            logToFile("DEBUG", "Sufficient allowance already set", {
+              tokenId: tokenId.substring(0, 10) + "...",
+              currentAllowance: allowanceFormatted,
+              requiredAmount: orderSize,
+            });
+          }
+        }
       } catch (balanceError) {
         if (
           balanceError.message &&
@@ -803,10 +983,14 @@ async function placeMarketSellOrder(
         ) {
           throw balanceError;
         }
-        logToFile("WARN", "Failed to check token balance, proceeding", {
-          tokenId,
-          error: balanceError.message,
-        });
+        logToFile(
+          "WARN",
+          "Failed to check token balance/allowance, proceeding",
+          {
+            tokenId,
+            error: balanceError.message,
+          }
+        );
       }
     }
 
@@ -980,7 +1164,6 @@ async function placeMarketSellOrder(
             }
           );
           if (attempt < MAX_CLOUDFLARE_RETRIES) {
-            const newNonce = Date.now() * 1000;
             order = await clobClient.createOrder({
               tokenID: tokenId,
               price: marketPrice,
