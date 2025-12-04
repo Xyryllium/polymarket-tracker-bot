@@ -1,6 +1,11 @@
 const fs = require("fs");
 const path = require("path");
 
+const logsDir = path.join(__dirname, "..", "logs");
+if (!fs.existsSync(logsDir)) {
+  fs.mkdirSync(logsDir, { recursive: true });
+}
+
 function getLogFile() {
   const isTest =
     process.env.NODE_ENV === "test" ||
@@ -8,7 +13,7 @@ function getLogFile() {
     process.argv.some((arg) => arg.includes("test"));
 
   const filename = isTest ? "bot.test.log" : "bot.production.log";
-  return path.join(__dirname, "..", filename);
+  return path.join(logsDir, filename);
 }
 
 function logToFile(level, message, data = null) {
@@ -47,7 +52,7 @@ function getWebSocketLogFile() {
     process.argv.some((arg) => arg.includes("test"));
 
   const filename = isTest ? "websocket.test.log" : "websocket.production.log";
-  return path.join(__dirname, "..", filename);
+  return path.join(logsDir, filename);
 }
 
 function logWebSocketToFile(level, message, data = null) {
@@ -80,7 +85,7 @@ function getTradeLogFile() {
     process.argv.some((arg) => arg.includes("test"));
 
   const filename = isTest ? "trades.test.log" : "trades.production.log";
-  return path.join(__dirname, "..", filename);
+  return path.join(logsDir, filename);
 }
 
 function logTradeToFile(level, message, data = null) {
@@ -120,8 +125,29 @@ try {
   if (fs.existsSync(tradeLogFile)) {
     fs.writeFileSync(tradeLogFile, "");
   }
+
+  const rootDir = path.join(__dirname, "..");
+  const oldLogFiles = [
+    path.join(rootDir, "bot.production.log"),
+    path.join(rootDir, "bot.test.log"),
+    path.join(rootDir, "bot.log"),
+    path.join(rootDir, "websocket.production.log"),
+    path.join(rootDir, "websocket.test.log"),
+    path.join(rootDir, "trades.production.log"),
+    path.join(rootDir, "trades.test.log"),
+  ];
+
+  oldLogFiles.forEach((oldFile) => {
+    if (fs.existsSync(oldFile)) {
+      try {
+        fs.unlinkSync(oldFile);
+      } catch (error) {
+        // Ignore errors when cleaning up old files
+      }
+    }
+  });
 } catch (error) {
-  console.error("Failed to clear log files:", error.message);
+  console.error("Failed to initialize log files:", error.message);
 }
 
 module.exports = { logToFile, logWebSocketToFile, logTradeToFile };

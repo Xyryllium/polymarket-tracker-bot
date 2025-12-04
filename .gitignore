@@ -17,6 +17,7 @@ build/
 # Log files
 bot.log
 *.log
+logs/
 
 # Paper trading state
 paper-trading-state.json
