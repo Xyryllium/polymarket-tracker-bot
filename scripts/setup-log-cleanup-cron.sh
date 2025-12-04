@@ -49,7 +49,7 @@ case $choice in
         ;;
 esac
 
-CRON_JOB="$CRON_SCHEDULE cd $PROJECT_DIR && /usr/bin/node $CLEANUP_SCRIPT $RETENTION_HOURS >> $PROJECT_DIR/logs/cleanup-cron.log 2>&1"
+CRON_JOB="$CRON_SCHEDULE cd \"$PROJECT_DIR\" && /usr/bin/node \"$CLEANUP_SCRIPT\" $RETENTION_HOURS >> \"$PROJECT_DIR/logs/cleanup-cron.log\" 2>&1"
 
 if crontab -l 2>/dev/null | grep -q "$CLEANUP_SCRIPT"; then
     echo ""
