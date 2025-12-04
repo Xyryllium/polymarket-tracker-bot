@@ -7,7 +7,7 @@ const {
   POLYMARKET_FUNDER,
   CLOB_EXCHANGE_ADDRESS,
 } = require("../config");
-const { logToFile } = require("../utils/logger");
+const { logToFile, logTradeToFile } = require("../utils/logger");
 const { isCloudflareBlock } = require("../utils/helpers");
 
 let orderNonce = 0;

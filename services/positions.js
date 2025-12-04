@@ -53,8 +53,16 @@ function setClobClient(client, ready) {
   clobClientReady = ready;
 }
 
+function getClobClient() {
+  return { clobClient, clobClientReady };
+}
+
 function setSigner(signerInstance) {
   signer = signerInstance;
+}
+
+function getSigner() {
+  return signer;
 }
 
 function setCurrentWallet(wallet) {
@@ -540,7 +548,9 @@ module.exports = {
   hasInitialTradeBeenPlaced,
   markInitialTradePlaced,
   setClobClient,
+  getClobClient,
   setSigner,
+  getSigner,
   setCurrentWallet,
   recordBuyTrade,
   getRecentBuyTrades,

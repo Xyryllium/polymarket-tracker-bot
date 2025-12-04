@@ -15,7 +15,6 @@ async function cleanupHourlyEvents(
     const allPositions = getAllStopLossPositions();
 
     if (allPositions.size === 0) {
-      logToFile("DEBUG", "No stop-loss positions to check for cleanup", {});
       return;
     }
 
@@ -27,20 +26,6 @@ async function cleanupHourlyEvents(
           String(item?.side).toUpperCase() === "SELL") &&
         item?.conditionId
     );
-
-    logToFile("DEBUG", "Proactive hourly event cleanup check", {
-      monitoredPositions: allPositions.size,
-      recentTradesWithConditionId: recentTrades.length,
-      positionDetails: Array.from(allPositions.entries()).map(
-        ([tokenId, pos]) => ({
-          tokenId: tokenId.substring(0, 10) + "...",
-          conditionId: pos.conditionId
-            ? pos.conditionId.substring(0, 10) + "..."
-            : null,
-          market: pos.market,
-        })
-      ),
-    });
 
     const marketTypeToConditionIds = new Map();
     for (const trade of recentTrades) {
@@ -75,20 +60,11 @@ async function cleanupHourlyEvents(
       const marketType = marketTypeMatch ? marketTypeMatch[1].trim() : null;
 
       if (!marketType) {
-        logToFile("DEBUG", "Could not extract market type from position", {
-          tokenId: tokenId.substring(0, 10) + "...",
-          market: position.market,
-        });
         continue;
       }
 
       const conditionIdMap = marketTypeToConditionIds.get(marketType);
       if (!conditionIdMap || conditionIdMap.size === 0) {
-        logToFile("DEBUG", "No conditionId map found for market type", {
-          tokenId: tokenId.substring(0, 10) + "...",
-          marketType,
-          availableMarketTypes: Array.from(marketTypeToConditionIds.keys()),
-        });
         continue;
       }
 
@@ -116,41 +92,30 @@ async function cleanupHourlyEvents(
         }
 
         if (latestEvent) {
-          logToFile(
-            "INFO",
-            "Cleaning up old hourly event subscription - detected new event in recent trades",
-            {
-              oldTokenId: tokenId.substring(0, 10) + "...",
-              oldConditionId: position.conditionId.substring(0, 10) + "...",
-              newConditionId: latestEvent.conditionId.substring(0, 10) + "...",
-              marketType,
-            }
-          );
-          orderbookWS.unsubscribe(tokenId);
-          deleteStopLossPosition(tokenId);
-        } else {
-          logToFile("DEBUG", "No latest event found for cleanup", {
-            tokenId: tokenId.substring(0, 10) + "...",
-            positionConditionId: position.conditionId
-              ? position.conditionId.substring(0, 10) + "..."
-              : null,
-            marketType,
-            conditionIdsInMap: Array.from(conditionIdMap.keys()).map(
-              (cid) => cid.substring(0, 10) + "..."
-            ),
-          });
+          const MIN_POSITION_AGE_MS = 10 * 60 * 1000;
+          const positionAge = position.entryTimestamp
+            ? Date.now() - position.entryTimestamp
+            : Infinity;
+
+          if (positionAge < MIN_POSITION_AGE_MS) {
+            // Skip cleanup for positions created within last 10 minutes
+          } else {
+            logToFile(
+              "INFO",
+              "Cleaning up old hourly event subscription - detected new event in recent trades",
+              {
+                oldTokenId: tokenId.substring(0, 10) + "...",
+                oldConditionId: position.conditionId.substring(0, 10) + "...",
+                newConditionId:
+                  latestEvent.conditionId.substring(0, 10) + "...",
+                marketType,
+                positionAgeMs: positionAge,
+              }
+            );
+            orderbookWS.unsubscribe(tokenId);
+            deleteStopLossPosition(tokenId);
+          }
         }
-      } else {
-        logToFile("DEBUG", "No different conditionId found for market type", {
-          tokenId: tokenId.substring(0, 10) + "...",
-          positionConditionId: position.conditionId
-            ? position.conditionId.substring(0, 10) + "..."
-            : null,
-          marketType,
-          conditionIdsInMap: Array.from(conditionIdMap.keys()).map(
-            (cid) => cid.substring(0, 10) + "..."
-          ),
-        });
       }
     }
   } catch (cleanupError) {
