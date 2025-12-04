@@ -359,20 +359,22 @@ async function checkPositionLimits(
       }
     }
 
+    if (MAX_POSITIONS > 0) {
+      if (tradeSide === "BUY" && positionCount >= MAX_POSITIONS) {
+        return {
+          allowed: false,
+          reason: "position_count",
+          currentPositions: positionCount,
+          maxPositions: MAX_POSITIONS,
+          message: `Maximum position limit reached: ${positionCount}/${MAX_POSITIONS} positions open (Paper Trading).`,
+        };
+      }
+    }
+
     const newTotalExposure =
       tradeSide === "SELL"
         ? Math.max(0, totalExposure - proposedTradeValue)
         : totalExposure + proposedTradeValue;
-
-    if (tradeSide === "BUY" && positionCount >= MAX_POSITIONS) {
-      return {
-        allowed: false,
-        reason: "position_count",
-        currentPositions: positionCount,
-        maxPositions: MAX_POSITIONS,
-        message: `Maximum position limit reached: ${positionCount}/${MAX_POSITIONS} positions open (Paper Trading).`,
-      };
-    }
 
     if (MAX_TOTAL_EXPOSURE_USD > 0) {
       if (tradeSide === "BUY" && newTotalExposure > MAX_TOTAL_EXPOSURE_USD) {
@@ -423,20 +425,22 @@ async function checkPositionLimits(
 
   const positionCount = uniquePositions.size;
 
+  if (MAX_POSITIONS > 0) {
+    if (tradeSide === "BUY" && positionCount >= MAX_POSITIONS) {
+      return {
+        allowed: false,
+        reason: "position_count",
+        currentPositions: positionCount,
+        maxPositions: MAX_POSITIONS,
+        message: `Maximum position limit reached: ${positionCount}/${MAX_POSITIONS} positions open.`,
+      };
+    }
+  }
+
   const newTotalExposure =
     tradeSide === "SELL"
       ? Math.max(0, totalExposure - proposedTradeValue)
       : totalExposure + proposedTradeValue;
-
-  if (tradeSide === "BUY" && positionCount >= MAX_POSITIONS) {
-    return {
-      allowed: false,
-      reason: "position_count",
-      currentPositions: positionCount,
-      maxPositions: MAX_POSITIONS,
-      message: `Maximum position limit reached: ${positionCount}/${MAX_POSITIONS} positions open.`,
-    };
-  }
 
   if (MAX_TOTAL_EXPOSURE_USD > 0) {
     if (tradeSide === "BUY" && newTotalExposure > MAX_TOTAL_EXPOSURE_USD) {
