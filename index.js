@@ -2,11 +2,16 @@ require("dotenv").config();
 
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const fetch = require("node-fetch");
+const crypto = require("crypto");
 const { Wallet } = require("@ethersproject/wallet");
 const { JsonRpcProvider } = require("@ethersproject/providers");
 const { Contract } = require("@ethersproject/contracts");
 let ClobClient = null;
 let OrderType = null;
+
+if (typeof globalThis.crypto === "undefined") {
+  globalThis.crypto = crypto.webcrypto;
+}
 
 const {
   POLL_INTERVAL_MS,

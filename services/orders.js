@@ -1,4 +1,5 @@
 const { Contract } = require("@ethersproject/contracts");
+const crypto = require("crypto");
 const {
   MAX_CLOUDFLARE_RETRIES,
   CLOUDFLARE_RETRY_DELAY_MS,
@@ -13,6 +14,9 @@ let orderNonce = 0;
 let clobClientModule = null;
 async function getClobClientModule() {
   if (!clobClientModule) {
+    if (typeof globalThis.crypto === "undefined") {
+      globalThis.crypto = crypto.webcrypto;
+    }
     clobClientModule = await import("@polymarket/clob-client");
   }
   return clobClientModule;
