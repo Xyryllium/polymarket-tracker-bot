@@ -12,7 +12,12 @@
     "pm2:delete": "pm2 delete polymarket-discord-bot",
     "pm2:logs": "pm2 logs polymarket-discord-bot",
     "pm2:status": "pm2 status",
-    "update": "npm install && pm2 reload polymarket-discord-bot"
+    "update": "npm install && pm2 reload polymarket-discord-bot",
+    "logs:cleanup": "node scripts/cleanup-logs.js 24",
+    "logs:cleanup:weekly": "node scripts/cleanup-logs.js 168",
+    "logs:setup:pm2": "bash scripts/setup-pm2-logrotate.sh",
+    "logs:setup:cron": "bash scripts/setup-log-cleanup-cron.sh",
+    "logs:migrate": "bash scripts/migrate-logs-to-folder.sh"
   },
   "keywords": [],
   "author": "",
