@@ -2,11 +2,16 @@ require("dotenv").config();
 
 const { Client, GatewayIntentBits, Partials } = require("discord.js");
 const fetch = require("node-fetch");
-const { ClobClient } = require("@polymarket/clob-client");
+const crypto = require("crypto");
 const { Wallet } = require("@ethersproject/wallet");
 const { JsonRpcProvider } = require("@ethersproject/providers");
 const { Contract } = require("@ethersproject/contracts");
-const { OrderType } = require("@polymarket/clob-client");
+let ClobClient = null;
+let OrderType = null;
+
+if (typeof globalThis.crypto === "undefined") {
+  globalThis.crypto = crypto.webcrypto;
+}
 
 const {
   POLL_INTERVAL_MS,
@@ -80,6 +85,10 @@ if (POLYMARKET_PRIVATE_KEY) {
   signer = new Wallet(POLYMARKET_PRIVATE_KEY, provider);
   (async () => {
     try {
+      const clobClientModule = await import("@polymarket/clob-client");
+      ClobClient = clobClientModule.ClobClient;
+      OrderType = clobClientModule.OrderType;
+
       const host = "https://clob.polymarket.com";
       const chainId = 137;
 
@@ -286,6 +295,10 @@ client.on("messageCreate", async (message) => {
       await message.channel.send(
         `Placing BUY order for ${size} shares at ${price}...`
       );
+      if (!OrderType) {
+        const clobClientModule = await import("@polymarket/clob-client");
+        OrderType = clobClientModule.OrderType;
+      }
       const orderTypeEnum = OrderType[orderType];
       const response = await placeBuyOrder(
         tokenId,
@@ -350,6 +363,10 @@ client.on("messageCreate", async (message) => {
       await message.channel.send(
         `Placing SELL order for ${size} shares at ${price}...`
       );
+      if (!OrderType) {
+        const clobClientModule = await import("@polymarket/clob-client");
+        OrderType = clobClientModule.OrderType;
+      }
       const orderTypeEnum = OrderType[orderType];
       const response = await placeSellOrder(
         tokenId,

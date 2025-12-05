@@ -1,5 +1,5 @@
-const { Side, OrderType } = require("@polymarket/clob-client");
 const { Contract } = require("@ethersproject/contracts");
+const crypto = require("crypto");
 const {
   MAX_CLOUDFLARE_RETRIES,
   CLOUDFLARE_RETRY_DELAY_MS,
@@ -11,6 +11,16 @@ const { logToFile, logTradeToFile } = require("../utils/logger");
 const { isCloudflareBlock } = require("../utils/helpers");
 
 let orderNonce = 0;
+let clobClientModule = null;
+async function getClobClientModule() {
+  if (!clobClientModule) {
+    if (typeof globalThis.crypto === "undefined") {
+      globalThis.crypto = crypto.webcrypto;
+    }
+    clobClientModule = await import("@polymarket/clob-client");
+  }
+  return clobClientModule;
+}
 
 function setOrderNonce(nonce) {
   orderNonce = nonce;
@@ -39,6 +49,8 @@ async function placeBuyOrder(
     logToFile("ERROR", "placeBuyOrder failed", { error, tokenId, price, size });
     throw new Error(error);
   }
+
+  const { Side } = await getClobClientModule();
 
   try {
     let response;
@@ -86,6 +98,7 @@ async function placeBuyOrder(
             }
           );
           if (attempt < MAX_CLOUDFLARE_RETRIES) {
+            const { Side } = await getClobClientModule();
             order = await clobClient.createOrder({
               tokenID: tokenId,
               price: price,
@@ -128,6 +141,7 @@ async function placeBuyOrder(
             }
           );
           if (attempt < MAX_CLOUDFLARE_RETRIES) {
+            const { Side } = await getClobClientModule();
             order = await clobClient.createOrder({
               tokenID: tokenId,
               price: price,
@@ -244,6 +258,8 @@ async function placeSellOrder(
     throw new Error(error);
   }
 
+  const { Side } = await getClobClientModule();
+
   try {
     let response;
     let lastError = null;
@@ -324,6 +340,7 @@ async function placeSellOrder(
             }
           );
           if (attempt < MAX_CLOUDFLARE_RETRIES) {
+            const { Side } = await getClobClientModule();
             order = await clobClient.createOrder({
               tokenID: tokenId,
               price: price,
@@ -360,6 +377,7 @@ async function placeSellOrder(
             }
           );
           if (attempt < MAX_CLOUDFLARE_RETRIES) {
+            const { Side } = await getClobClientModule();
             order = await clobClient.createOrder({
               tokenID: tokenId,
               price: price,
@@ -458,6 +476,8 @@ async function placeMarketBuyOrder(
     });
     throw new Error(error);
   }
+
+  const { Side, OrderType } = await getClobClientModule();
 
   try {
     const MIN_ORDER_VALUE_USD = 1;
@@ -630,6 +650,7 @@ async function placeMarketBuyOrder(
           );
         }
 
+        const { Side, OrderType } = await getClobClientModule();
         const orderParams = {
           tokenID: tokenId,
           amount: currentOrderAmount,
@@ -687,6 +708,7 @@ async function placeMarketBuyOrder(
             }
           );
           if (attempt < MAX_CLOUDFLARE_RETRIES) {
+            const { Side, OrderType } = await getClobClientModule();
             const orderParams = {
               tokenID: tokenId,
               amount: currentOrderAmount,
@@ -771,6 +793,7 @@ async function placeMarketBuyOrder(
             }
           );
           if (attempt < MAX_CLOUDFLARE_RETRIES) {
+            const { Side } = await getClobClientModule();
             const orderParams = {
               tokenID: tokenId,
               amount: currentOrderAmount,
@@ -1149,6 +1172,7 @@ async function placeMarketSellOrder(
           }
         }
 
+        const { Side, OrderType } = await getClobClientModule();
         const orderParams = {
           tokenID: tokenId,
           amount: currentOrderSize,
@@ -1177,6 +1201,7 @@ async function placeMarketSellOrder(
             }
           );
           if (attempt < MAX_CLOUDFLARE_RETRIES) {
+            const { Side, OrderType } = await getClobClientModule();
             const retryOrderParams = {
               tokenID: tokenId,
               amount: orderSize,
@@ -1270,6 +1295,7 @@ async function placeMarketSellOrder(
             }
           );
           if (attempt < MAX_CLOUDFLARE_RETRIES) {
+            const { Side } = await getClobClientModule();
             order = await clobClient.createOrder({
               tokenID: tokenId,
               price: marketPrice,
